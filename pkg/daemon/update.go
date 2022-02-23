@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -27,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/kubernetes/pkg/credentialprovider"
 
 	mcfgv1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
 	ctrlcommon "github.com/openshift/machine-config-operator/pkg/controller/common"
@@ -476,6 +478,7 @@ func calculatePostConfigChangeAction(diff *machineConfigDiff, diffFileSet []stri
 
 // update the node to the provided node configuration.
 func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr error) {
+
 	oldConfig = canonicalizeEmptyMC(oldConfig)
 
 	if dn.nodeWriter != nil {
@@ -2009,4 +2012,134 @@ func (dn *Daemon) reboot(rationale string) error {
 	// if everything went well, this should be unreachable.
 	MCDRebootErr.WithLabelValues(dn.node.Name, "reboot failed", "this error should be unreachable, something is seriously wrong").SetToCurrentTime()
 	return fmt.Errorf("reboot failed; this error should be unreachable, something is seriously wrong")
+}
+
+func (dn *Daemon) experimentalUpdateLayeredConfig() error {
+
+	// TODO(jkyros): right now you skip drain and reboot, you should do those
+	// TODO(jkyros): config drift should work EXCEPT for the OSImageURL
+
+	// TODO(jkyros): this is awful, but we know we rolled a node event so we can just ignore the configs
+	desiredImage := dn.node.Annotations["machineconfiguration.openshift.io/desired-layered-image"]
+	currentImage := dn.node.Annotations["machineconfiguration.openshift.io/current-layered-image"]
+
+	// This is for the live-apply case that we haven't fully thought through yet
+	liveUpdatedEquivalentTo := dn.node.Annotations["machineconfiguration.openshift.io/live-updated-equivalent-to"]
+
+	// Layered doesn't exist right out of the gate right now, it takes some time to reconcile
+	if desiredImage == "" {
+		glog.Infof("Looks like we don't have a desired image yet. Nothing to do.")
+		return nil
+	}
+
+	if currentImage == desiredImage {
+		// Orrrr....if we've live updated to it
+		glog.Info("Node is on proper image %s", desiredImage)
+
+	} else if liveUpdatedEquivalentTo == desiredImage {
+		glog.Info("No need to update, live update is equivalent")
+	} else {
+
+		client := &RpmOstreeClient{}
+		state, err := client.GetState()
+		if err != nil {
+			return err
+		}
+
+		// Look through our deployments
+		// If we've rebased to it, but not booted, that's okay IF we've live-applied
+		// but we need to know whether we're live applying when we rebase
+		// ughhhh it really should be transactional
+
+		for _, deployment := range state.Deployments {
+			// What we're looking for is at least in the list
+			if strings.TrimPrefix(deployment.ContainerImageReference, "ostree-unverified-registry:") == desiredImage {
+				// We rebased but we haven't booted, might be a liveapply
+				if deployment.Staged == true {
+					//TODO(jkyros): Check to see about liveapply
+					glog.Infof("Node is staged to %s, checking to see if we've liveapplied", desiredImage)
+					return nil
+				}
+
+				// Everything is perfect, we're already there the good way
+				if deployment.Booted == true {
+					glog.Info("Node is already in image %s", desiredImage)
+					//TODO(jkyros): Add an annotation
+					return nil
+				}
+			}
+		}
+
+		pullSecret, err := dn.GetPullSecret()
+		if err != nil {
+			return err
+		}
+
+		//TODO(jkyros): what should these perms be
+		os.Mkdir("/run/ostree", 0544)
+
+		err = ioutil.WriteFile("/run/ostree/auth.json", pullSecret, 0400)
+		if err != nil {
+			return err
+		}
+
+		_, err = client.RebaseLayered(desiredImage)
+		if err != nil {
+			return err
+		}
+
+		//defer os.Unlink("/run/ostree/auth.json")
+
+	}
+
+	// 	get the image from the host
+	// see if it's the one in spec config
+	// if it's not, then we need to
+	// 0.) run the rules engine on it to see if we can live-apply this
+	// 1.) if we can, do that
+	// 2;) but how do we signal that we did that? Rebase anyway, but don't boot?
+	// 3.) I mean that's what liveapply does so I guess if we trust it it's cool? we can come back?
+	// so then we just check it to see if it's either in, or pending + delta both are okay
+	// 1.) copy the auth to the local host
+	// 2.) rebase to it
+
+	//deployment := client.GetBootedDeployment()
+	//osImageUrl := client.GetBootedOSImageURL()
+	//os
+
+	return nil
+}
+
+func (dn *Daemon) GetPullSecret() ([]byte, error) {
+	var targetNamespace = "openshift-machine-config-operator"
+
+	// Get the service accoutn
+	mcdServiceAccount, err := dn.kubeClient.CoreV1().ServiceAccounts(targetNamespace).Get(context.TODO(), "machine-config-daemon", metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("Failed to retrieve the mcc service account: %s", err)
+	}
+	// Get the secret off the service account
+	imagePullSecret, err := dn.kubeClient.CoreV1().Secrets(targetNamespace).Get(context.TODO(), mcdServiceAccount.ImagePullSecrets[0].Name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("Failed to retrieve the image pull secret: %s", err)
+	}
+
+	// Get the data out of it
+	dockerConfigData := imagePullSecret.Data[corev1.DockerConfigKey]
+
+	// Unmarshal it into the proper struct
+	var dockerConfig credentialprovider.DockerConfig
+	err = json.Unmarshal(dockerConfigData, &dockerConfig)
+
+	// Re-pack it into an auth file (what comes out of the API doesn't have the "auths" object in the json)
+	dockerConfigJSON := credentialprovider.DockerConfigJSON{
+		Auths: dockerConfig,
+	}
+	authfileData, err := json.Marshal(dockerConfigJSON)
+	if err != nil {
+		fmt.Errorf("Error trying to marshal docker secrets: %s", authfileData)
+	}
+
+	return authfileData, nil
+
 }

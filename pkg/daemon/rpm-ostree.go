@@ -222,6 +222,20 @@ func (r *RpmOstreeClient) GetBootedDeployment() (*RpmOstreeDeployment, error) {
 	return nil, fmt.Errorf("not currently booted in a deployment")
 }
 
+func (r *RpmOstreeClient) GetState() (*OstreeStatus, error) {
+
+	var rosState OstreeStatus
+	output, err := runGetOut("rpm-ostree", "status", "--json")
+	if err != nil {
+		return nil, err
+	}
+
+	if err := json.Unmarshal(output, &rosState); err != nil {
+		return nil, errors.Wrapf(err, "failed to parse `rpm-ostree status --json` output (%s)", truncate(string(output), 30))
+	}
+	return &rosState, nil
+}
+
 // GetStatus returns multi-line human-readable text describing system status
 func (r *RpmOstreeClient) GetStatus() (string, error) {
 	output, err := runGetOut("rpm-ostree", "status")
@@ -376,6 +390,41 @@ func (r *RpmOstreeClient) Rebase(imgURL, osImageContentDir string) (changed bool
 	return
 }
 
+// Rebase potentially rebases system if not already rebased.
+func (r *RpmOstreeClient) RebaseLayered(imgURL string) (changed bool, err error) {
+
+	defaultDeployment, err := r.GetBootedDeployment()
+	if err != nil {
+		return
+	}
+
+	previousPivot := ""
+	if len(defaultDeployment.CustomOrigin) > 0 {
+		if strings.HasPrefix(defaultDeployment.CustomOrigin[0], "pivot://") {
+			previousPivot = defaultDeployment.CustomOrigin[0][len("pivot://"):]
+			glog.Infof("Previous pivot: %s", previousPivot)
+		} else {
+			glog.Infof("Previous custom origin: %s", defaultDeployment.CustomOrigin[0])
+		}
+	} else {
+		glog.Info("Current origin is not custom")
+	}
+
+	// This will be what will be displayed in `rpm-ostree status` as the "origin spec"
+	customURL := fmt.Sprintf("pivot://%s", imgURL)
+	glog.Infof("Executing rebase to %s", imgURL)
+
+	args := []string{"rebase", "--experimental", "ostree-unverified-registry:" + imgURL,
+		"--custom-origin-url", customURL, "--custom-origin-description", "Layered image managed by machine-config-operator"}
+
+	if err = runRpmOstree(args...); err != nil {
+		return
+	}
+
+	changed = true
+	return
+}
+
 // truncate a string using runes/codepoints as limits.
 // This specifically will avoid breaking a UTF-8 value.
 func truncate(input string, limit int) string {
@@ -403,4 +452,57 @@ func runGetOut(command string, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("error running %s %s: %s%s", command, strings.Join(args, " "), err, errtext)
 	}
 	return rawOut, nil
+}
+
+type OstreeStatus struct {
+	Deployments []struct {
+		RequestedLocalPackages []interface{} `json:"requested-local-packages"`
+		BaseCommitMeta         struct {
+			OstreeContainerImageConfig  string   `json:"ostree.container.image-config"`
+			OstreeManifest              string   `json:"ostree.manifest"`
+			OstreeManifestDigest        string   `json:"ostree.manifest-digest"`
+			OstreeImporterVersion       string   `json:"ostree.importer.version"`
+			CoreosAssemblerConfigGitrev string   `json:"coreos-assembler.config-gitrev"`
+			RpmostreeInitramfsArgs      []string `json:"rpmostree.initramfs-args"`
+			OstreeLinux                 string   `json:"ostree.linux"`
+			RpmostreeRpmmdRepos         []struct {
+				ID        string `json:"id"`
+				Timestamp int64  `json:"timestamp"`
+			} `json:"rpmostree.rpmmd-repos"`
+			CoreosAssemblerConfigDirty string                    `json:"coreos-assembler.config-dirty"`
+			OstreeBootable             bool                      `json:"ostree.bootable"`
+			CoreosAssemblerBasearch    string                    `json:"coreos-assembler.basearch"`
+			Version                    string                    `json:"version"`
+			RpmostreeInputhash         string                    `json:"rpmostree.inputhash"`
+			OstreeTarFiltered          map[string]map[string]int `json:"ostree.tar-filtered"`
+		} `json:"base-commit-meta,omitempty"`
+		BaseRemovals                       []interface{} `json:"base-removals"`
+		Unlocked                           string        `json:"unlocked"`
+		Booted                             bool          `json:"booted"`
+		RequestedLocalFileoverridePackages []interface{} `json:"requested-local-fileoverride-packages"`
+		ID                                 string        `json:"id"`
+		Osname                             string        `json:"osname"`
+		Pinned                             bool          `json:"pinned"`
+		ModulesEnabled                     []interface{} `json:"modules-enabled"`
+		RegenerateInitramfs                bool          `json:"regenerate-initramfs"`
+		BaseLocalReplacements              []interface{} `json:"base-local-replacements"`
+		ContainerImageReference            string        `json:"container-image-reference,omitempty"`
+		Checksum                           string        `json:"checksum"`
+		RequestedBaseLocalReplacements     []interface{} `json:"requested-base-local-replacements"`
+		RequestedModules                   []interface{} `json:"requested-modules"`
+		RequestedPackages                  []interface{} `json:"requested-packages"`
+		Serial                             int           `json:"serial"`
+		Timestamp                          int           `json:"timestamp"`
+		Packages                           []interface{} `json:"packages"`
+		Staged                             bool          `json:"staged"`
+		RequestedBaseRemovals              []interface{} `json:"requested-base-removals"`
+		Modules                            []interface{} `json:"modules"`
+		ContainerImageReferenceDigest      string        `json:"container-image-reference-digest,omitempty"`
+		Origin                             string        `json:"origin,omitempty"`
+		Version                            string        `json:"version,omitempty"`
+		CustomOrigin                       []string      `json:"custom-origin,omitempty"`
+	} `json:"deployments"`
+	Transaction  interface{} `json:"transaction"`
+	CachedUpdate interface{} `json:"cached-update"`
+	UpdateDriver interface{} `json:"update-driver"`
 }

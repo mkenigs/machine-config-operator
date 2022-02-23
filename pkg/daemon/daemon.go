@@ -486,6 +486,11 @@ func (dn *Daemon) syncNode(key string) error {
 			return err
 		}
 
+		// Hack in our layered node workflow for this magic pool
+		if _, ok := dn.node.Labels[ctrlcommon.ExperimentalLayeringPoolLabel]; ok {
+			return dn.experimentalUpdateLayeredConfig()
+		}
+
 		if err := dn.triggerUpdateWithMachineConfig(current, desired); err != nil {
 			return err
 		}
@@ -1521,6 +1526,13 @@ func (dn *Daemon) checkOS(osImageURL string) bool {
 	// Nothing to do if we're not on RHCOS or FCOS
 	if !dn.os.IsCoreOSVariant() {
 		glog.Infof(`Not booted into a CoreOS variant, ignoring target OSImageURL %s`, osImageURL)
+		return true
+	}
+
+	// TODO(jkyros): at some point we're going to have to figure out how/if we actually
+	// want to deal with layering and OSImageURLs
+	if _, ok := dn.node.Labels[ctrlcommon.ExperimentalLayeringPoolLabel]; ok {
+		glog.Infof("This is a layered host, ignoring OSImageURL %s", osImageURL)
 		return true
 	}
 
