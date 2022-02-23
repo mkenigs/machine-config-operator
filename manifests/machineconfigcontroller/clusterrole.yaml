@@ -25,3 +25,6 @@ rules:
 - apiGroups: ["operator.openshift.io"]
   resources: ["etcds"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["build.openshift.io"]
+  resources: ["buildconfigs"]
+  verbs: ["*"]
