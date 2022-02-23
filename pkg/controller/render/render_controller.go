@@ -2,11 +2,20 @@ package render
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"net/http"
+	"path"
 	"reflect"
 	"time"
 
 	"github.com/golang/glog"
+	buildv1 "github.com/openshift/api/build/v1"
+	imagev1 "github.com/openshift/api/image/v1"
+	buildclientset "github.com/openshift/client-go/build/clientset/versioned"
+	imageclientset "github.com/openshift/client-go/image/clientset/versioned"
 	mcoResourceApply "github.com/openshift/machine-config-operator/lib/resourceapply"
 	mcfgv1 "github.com/openshift/machine-config-operator/pkg/apis/machineconfiguration.openshift.io/v1"
 	ctrlcommon "github.com/openshift/machine-config-operator/pkg/controller/common"
@@ -16,6 +25,7 @@ import (
 	mcfginformersv1 "github.com/openshift/machine-config-operator/pkg/generated/informers/externalversions/machineconfiguration.openshift.io/v1"
 	mcfglistersv1 "github.com/openshift/machine-config-operator/pkg/generated/listers/machineconfiguration.openshift.io/v1"
 	"github.com/openshift/machine-config-operator/pkg/version"
+	"github.com/vincent-petithory/dataurl"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,9 +35,16 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/crane"
+	"github.com/google/go-containerregistry/pkg/name"
+
+	ign3types "github.com/coreos/ignition/v2/config/v3_2/types"
 )
 
 const (
@@ -53,6 +70,9 @@ var (
 // Controller defines the render controller.
 type Controller struct {
 	client        mcfgclientset.Interface
+	imageclient   imageclientset.Interface
+	buildclient   buildclientset.Interface
+	kubeclient    clientset.Interface
 	eventRecorder record.EventRecorder
 
 	syncHandler              func(mcp string) error
@@ -77,6 +97,9 @@ func New(
 	ccInformer mcfginformersv1.ControllerConfigInformer,
 	kubeClient clientset.Interface,
 	mcfgClient mcfgclientset.Interface,
+	imageClient imageclientset.Interface,
+	buildclient buildclientset.Interface,
+
 ) *Controller {
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(glog.Infof)
@@ -84,6 +107,9 @@ func New(
 
 	ctrl := &Controller{
 		client:        mcfgClient,
+		kubeclient:    kubeClient,
+		imageclient:   imageClient,
+		buildclient:   buildclient,
 		eventRecorder: eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "machineconfigcontroller-rendercontroller"}),
 		queue:         workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "machineconfigcontroller-rendercontroller"),
 	}
@@ -525,6 +551,18 @@ func (ctrl *Controller) syncGeneratedMachineConfig(pool *mcfgv1.MachineConfigPoo
 	}
 	glog.V(2).Infof("Pool %s: now targeting: %s", pool.Name, pool.Spec.Configuration.Name)
 
+	// TODO(jkyros): Hacked this in, take it out later when/if you figure out where it should go
+	// I initially picked here rather than in node-controller because I wasn't sure if we'd need to update OsImageURL or
+	// include special files in our render (e.g. machineconfig-to-ignition, etc)
+	if pool.Name == "layered" {
+		glog.Infof("Pool %s is s special pool, rendering config to imagestream", pool.Name)
+		// jkyros: Just put this here for now since it's convenient
+		err = ctrl.experimentalRenderToImagestream(pool, generated)
+		if err != nil {
+			glog.Warningf("Failed to EXPERIMENTALLY render to image stream: %s", err)
+		}
+	}
+
 	if err := ctrl.garbageCollectRenderedConfigs(pool); err != nil {
 		return err
 	}
@@ -627,4 +665,280 @@ func getMachineConfigsForPool(pool *mcfgv1.MachineConfigPool, configs []*mcfgv1.
 		return nil, fmt.Errorf("couldn't find any MachineConfigs for pool: %v", pool.Name)
 	}
 	return out, nil
+}
+
+// experimentalAddBuildConfigs creates a build config for a pool so that its content automatically
+// gets rendered into an image when the machineconfig content changes
+func (ctrl *Controller) experimentalAddBuildConfigs(pool *mcfgv1.MachineConfigPool) error {
+
+	buildConfigName := fmt.Sprintf("mco-build-content-%s", pool.Name)
+	contentImageStreamName := fmt.Sprintf("mco-content-%s", pool.Name)
+	var targetNamespace = "openshift-machine-config-operator"
+
+	// Multistage build, butane is optional (the [l] character class makes it a 'wildcard' and it won't fail if it doesn't exist)
+	var dockerFile = `
+	FROM image-registry.openshift-image-registry.svc:5000/openshift-machine-config-operator/rendered-layered AS machineconfig
+	FROM image-registry.openshift-image-registry.svc:5000/openshift-machine-config-operator/coreos
+	#You'd think this would work, but it doesn't in a buildconfig
+	#COPY --from=machineconfig /mco-butane.yaml* /etc/
+	COPY --from=machineconfig /machineconfig.json /etc/mco-content-machineconfig.json
+	COPY --from=machineconfig /ignition.json /etc/mco-content-ignition.json
+	ENV container=1
+	RUN ignition-liveapply /etc/mco-content-ignition.json
+	#This tells me there are no configured repos? hmmmm
+	#RUN rpm-ostree ex rebuild && rm -rf /var/cache /etc/rpm-ostree/origin.d
+	`
+
+	// TODO(jkyros): ownerships!
+	_, err := ctrl.buildclient.BuildV1().BuildConfigs(targetNamespace).Get(context.TODO(), buildConfigName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+
+		// Construct a buildconfig for this pool if it doesn't exist
+		buildConfig := &buildv1.BuildConfig{
+
+			TypeMeta: metav1.TypeMeta{},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      buildConfigName,
+				Namespace: targetNamespace,
+				Annotations: map[string]string{
+					"machineconfiguration.openshift.io/pool": pool.Name,
+				},
+			},
+			Spec: buildv1.BuildConfigSpec{
+				// Trigger when our "machineconfig" image gets updated on a render
+				Triggers: []buildv1.BuildTriggerPolicy{
+					{
+						ImageChange: &buildv1.ImageChangeTrigger{
+							From: &corev1.ObjectReference{
+								Kind: "ImageStreamTag",
+								Name: "rendered-" + pool.Name + ":latest",
+							},
+							Paused: false,
+						},
+						Type: buildv1.ImageChangeBuildTriggerType,
+					},
+				},
+				RunPolicy: "Serial",
+				// Simple dockerfile build, just the text from above
+				CommonSpec: buildv1.CommonSpec{
+					Source: buildv1.BuildSource{
+						Type:       "Dockerfile",
+						Dockerfile: &dockerFile,
+					},
+					Strategy: buildv1.BuildStrategy{
+						DockerStrategy: &buildv1.DockerBuildStrategy{},
+						Type:           "Docker",
+					},
+					// Output to the imagestreams we made before
+					Output: buildv1.BuildOutput{
+						To: &corev1.ObjectReference{
+							Kind: "ImageStreamTag",
+							Name: contentImageStreamName + ":latest",
+						},
+						//TODO(jkyros): I want to label these images with which rendered config they were built from
+						// but there doesn't seem to be a way to get it in there easily
+					},
+				},
+			},
+		}
+
+		//TODO(jkyros): needs to be a better way to stuff it in that struct up there, but this works
+		poolKind := mcfgv1.SchemeGroupVersion.WithKind("MachineConfigPool")
+		oref := metav1.NewControllerRef(pool, poolKind)
+		buildConfig.SetOwnerReferences([]metav1.OwnerReference{*oref})
+
+		// Construct the buildconfig for this pool that will build an image out of the MCO content
+
+		// Create the buildconfig
+		_, err := ctrl.buildclient.BuildV1().BuildConfigs(targetNamespace).Create(context.TODO(), buildConfig, metav1.CreateOptions{})
+		if err != nil {
+			return err
+		}
+
+		glog.Infof("Buildconfig %s has been created for pool %s", buildConfigName, pool.Name)
+	} else if err != nil {
+		// some other error happened
+		return err
+	} else {
+		// already existed, do nothing
+		glog.Infof("Buildconfig %s already existed for pool %s", buildConfigName, pool.Name)
+	}
+
+	return nil
+}
+
+// experimentalRenderToImagestream is a dirty hack that sets up imagestream rendering of config (hopefully) without interrupting normal operation :)
+func (ctrl *Controller) experimentalRenderToImagestream(pool *mcfgv1.MachineConfigPool, generated *mcfgv1.MachineConfig) error {
+
+	var err error
+	var targetNamespace = "openshift-machine-config-operator"
+	// TODO(jkyros): look up the namespace
+
+	// Make sure we have an image stream to render content into
+	renderedImageStreamName := fmt.Sprintf("rendered-%s", pool.Name)
+	// And also, an imagestream to receive our "coreos-derive" build image
+	contentImageStreamName := fmt.Sprintf("mco-content-%s", pool.Name)
+
+	var ensureImageStreams = []string{renderedImageStreamName, contentImageStreamName, "coreos"}
+
+	glog.V(2).Infof("Ensuring image streams exist for pool %s", pool.Name)
+	// TODO(jkyros): This should probably be a controller thing somewhere
+	for _, imageStreamName := range ensureImageStreams {
+
+		_, err = ctrl.imageclient.ImageV1().ImageStreams(targetNamespace).Get(context.TODO(), imageStreamName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			// If we don't, we need to make it, otherwise our builds will fail
+
+			createMe := &imagev1.ImageStream{}
+			createMe.Name = imageStreamName
+			createMe.Namespace = targetNamespace
+			createMe.Spec.LookupPolicy.Local = false
+
+			// Set ownerships so these get cleaned up if we delete the pool
+			// TODO(jkyros): I have no idea if this actually cleans the images out of the stream if we delete it?
+			poolKind := mcfgv1.SchemeGroupVersion.WithKind("MachineConfigPool")
+			oref := metav1.NewControllerRef(pool, poolKind)
+			createMe.SetOwnerReferences([]metav1.OwnerReference{*oref})
+
+			// coreos imagestream is base, it's special, it needs to pull that image
+			if imageStreamName == "coreos" {
+				createMe.Spec = imagev1.ImageStreamSpec{
+					LookupPolicy:          imagev1.ImageLookupPolicy{Local: false},
+					DockerImageRepository: "",
+					Tags: []imagev1.TagReference{
+						{
+							Name: "latest",
+							From: &corev1.ObjectReference{
+								Kind: "DockerImage",
+								Name: "quay.io/jkyros/derived-images:rhcos-new-format-with-new-binaries",
+							},
+						},
+					},
+				}
+
+			}
+
+			// It didn't exist, put the imagestream in the cluster
+			_, err := ctrl.imageclient.ImageV1().ImageStreams(targetNamespace).Create(context.TODO(), createMe, metav1.CreateOptions{})
+			if err != nil {
+				return fmt.Errorf("Attempted to create imagestream %s but failed: ", err)
+			}
+			glog.Infof("Created image stream %s", imageStreamName)
+		} else if err != nil {
+			// I don't know if it existed or not, I couldn't get it
+			return fmt.Errorf("Failed to retrieve imagestream %s: %s", imageStreamName, err)
+		}
+
+		glog.Infof("Image stream %s already exists", renderedImageStreamName)
+	}
+
+	// Now that we have our imagestreams, set up the buildconfigs
+	err = ctrl.experimentalAddBuildConfigs(pool)
+	if err != nil {
+		return err
+	}
+
+	glog.V(2).Infof("Triggering image build for machineconfig %s", generated.Name)
+
+	// NOTE: below here essentially packs a tiny image containing our machine config content
+	// and stuffs it into the integrated repository using our servicetoken. I used "crane" because
+	// it was simple and straightforward, there's probably a podman/buildah/libcontainer equivalent
+	// that I should use instead.
+
+	// Get the ignition out of the MachineConfig
+	ignConf, err := ctrlcommon.ParseAndConvertConfig(generated.Spec.Config.Raw)
+	if err != nil {
+		glog.Errorf("parsing Ignition config failed with error: %v", err)
+	}
+
+	// Convert it to json
+	ignJSON, err := json.MarshalIndent(ignConf, "  ", "    ")
+	if err != nil {
+		glog.Warningf("Failed to marshal config for container: %s", err)
+	}
+
+	// Convert the MachineConfig to JSON also just in case we want it
+	machineConfigJSON, err := json.MarshalIndent(generated, "  ", "    ")
+	if err != nil {
+		glog.Warningf("Failed to marshal config for container: %s", err)
+	}
+
+	//TODO(jkyros): we could potentially expose the component machineconfigs or metadata here too
+
+	// This is the "file guts" for our "layer "
+	var fileMap = map[string][]byte{
+		"/machineconfig.json": machineConfigJSON,
+		"/ignition.json":      ignJSON,
+	}
+
+	// Lol I know, let's make this more compicated with nesting
+	// Add the butane to the image if we have some in our machineconfig
+	extractedButane, err := ctrlcommon.GetIgnitionFileDataByPath(&ignConf, "/etc/mco-butane.yaml")
+	if err == nil && extractedButane != nil {
+		fileMap["/butane.yaml"] = extractedButane
+	}
+
+	// This is essentially "FROM scratch"
+	// ADD /machineconfig.json
+	// ADD /ignition.json
+	newImg, err := crane.Image(fileMap)
+	if err != nil {
+		glog.Warningf("Failed to create image layer: %s", err)
+	}
+
+	// Tag it so we can push it into the integrated registry
+	// I added a RoleBinding manifest that gives us permission to push to the repo with our service account
+	contentTag := path.Join("image-registry.openshift-image-registry.svc:5000", targetNamespace, renderedImageStreamName)
+	tag, err := name.NewTag(contentTag + ":latest")
+	if err != nil {
+		return fmt.Errorf("Failed to create new tag %s: %s", contentTag, err)
+	}
+
+	// TODO(jkyros): handle the certificates properly rather than turning checking off
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	crane.WithTransport(tr)
+
+	// Retrieve our service account token (I know there is a more kubernetes-y way to do this, but this works for now)
+	stoken, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	if err != nil {
+		return fmt.Errorf("Unable to get service token: %s", stoken)
+	}
+
+	// Create our auth object to auth to the integrated repo
+	au := &authn.Basic{
+		Username: "machine-config-controller",
+		Password: string(stoken),
+	}
+
+	// Push our image into the integrated repo
+	if err := crane.Push(newImg, tag.String(), crane.WithTransport(tr), crane.WithAuth(au)); err != nil {
+		return fmt.Errorf("Failed to push image %s: %s", tag.String(), err)
+	} else {
+		glog.Infof("Image %s successfully pushed.", tag.String())
+	}
+
+	// After the image gets pushed, because of the image triggers, the buildconfigs will do their builds automatically
+	// And the mco-content-%pool imagestream will contain an image with the MCO content from applied to it
+
+	return nil
+}
+
+// TODO(jkyros): don't leave this here, expose it properly if you're gonna use it
+// StrToPtr returns a pointer to a string
+func StrToPtr(s string) *string {
+	return &s
+}
+
+// TODO(jkyros): don't leave this here, expose it properly if you're gonna use it
+// NewIgnFile returns a simple ignition3 file from just path and file contents
+func NewIgnFile(path, contents string) ign3types.File {
+	return ign3types.File{
+		Node: ign3types.Node{
+			Path: path,
+		},
+		FileEmbedded1: ign3types.FileEmbedded1{
+			Contents: ign3types.Resource{
+				Source: StrToPtr(dataurl.EncodeBytes([]byte(contents)))},
+		},
+	}
 }

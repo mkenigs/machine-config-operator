@@ -24,4 +24,7 @@ const (
 
 	// ClusterFeatureInstanceName is a singleton name for featureGate configuration
 	ClusterFeatureInstanceName = "cluster"
+
+	// ExperimentalLayeringPoolLabel defines the label associatied with the experimental layering pool
+	ExperimentalLayeringPoolLabel = "node-role.kubernetes.io/layered"
 )

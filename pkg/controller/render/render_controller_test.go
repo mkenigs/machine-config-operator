@@ -31,6 +31,9 @@ import (
 	informers "github.com/openshift/machine-config-operator/pkg/generated/informers/externalversions"
 	"github.com/openshift/machine-config-operator/pkg/version"
 	"github.com/openshift/machine-config-operator/test/helpers"
+
+	buildfake "github.com/openshift/client-go/build/clientset/versioned/fake"
+	imagefake "github.com/openshift/client-go/image/clientset/versioned/fake"
 )
 
 var (
@@ -65,7 +68,7 @@ func (f *fixture) newController() *Controller {
 	i := informers.NewSharedInformerFactory(f.client, noResyncPeriodFunc())
 
 	c := New(i.Machineconfiguration().V1().MachineConfigPools(), i.Machineconfiguration().V1().MachineConfigs(),
-		i.Machineconfiguration().V1().ControllerConfigs(), k8sfake.NewSimpleClientset(), f.client)
+		i.Machineconfiguration().V1().ControllerConfigs(), k8sfake.NewSimpleClientset(), f.client, imagefake.NewSimpleClientset(), buildfake.NewSimpleClientset())
 
 	c.mcpListerSynced = alwaysReady
 	c.mcListerSynced = alwaysReady
