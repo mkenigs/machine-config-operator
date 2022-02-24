@@ -28,3 +28,6 @@ rules:
 - apiGroups: ["build.openshift.io"]
   resources: ["buildconfigs"]
   verbs: ["*"]
+- apiGroups: ["image.openshift.io"]
+  resources: ["imagestreams"]
+  verbs: ["*"]
