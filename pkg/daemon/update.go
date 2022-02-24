@@ -2034,7 +2034,7 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 
 	if currentImage == desiredImage {
 		// Orrrr....if we've live updated to it
-		glog.Info("Node is on proper image %s", desiredImage)
+		glog.Infof("Node is on proper image %s", desiredImage)
 
 	} else if liveUpdatedEquivalentTo == desiredImage {
 		glog.Info("No need to update, live update is equivalent")
@@ -2063,7 +2063,7 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 
 				// Everything is perfect, we're already there the good way
 				if deployment.Booted == true {
-					glog.Info("Node is already in image %s", desiredImage)
+					glog.Infof("Node is already in image %s", desiredImage)
 					//TODO(jkyros): Add an annotation
 					return nil
 				}

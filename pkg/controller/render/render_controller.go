@@ -36,6 +36,9 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
 
+	imageinformersv1 "github.com/openshift/client-go/image/informers/externalversions/image/v1"
+	imagelistersv1 "github.com/openshift/client-go/image/listers/image/v1"
+
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
@@ -87,6 +90,9 @@ type Controller struct {
 	ccLister       mcfglistersv1.ControllerConfigLister
 	ccListerSynced cache.InformerSynced
 
+	isLister       imagelistersv1.ImageStreamLister
+	isListerSynced cache.InformerSynced
+
 	queue workqueue.RateLimitingInterface
 }
 
@@ -95,6 +101,7 @@ func New(
 	mcpInformer mcfginformersv1.MachineConfigPoolInformer,
 	mcInformer mcfginformersv1.MachineConfigInformer,
 	ccInformer mcfginformersv1.ControllerConfigInformer,
+	isInformer imageinformersv1.ImageStreamInformer,
 	kubeClient clientset.Interface,
 	mcfgClient mcfgclientset.Interface,
 	imageClient imageclientset.Interface,
@@ -125,6 +132,12 @@ func New(
 		DeleteFunc: ctrl.deleteMachineConfig,
 	})
 
+	isInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    ctrl.addImageStream,
+		UpdateFunc: ctrl.updateImageStream,
+		DeleteFunc: ctrl.deleteImageStream,
+	})
+
 	ctrl.syncHandler = ctrl.syncMachineConfigPool
 	ctrl.enqueueMachineConfigPool = ctrl.enqueueDefault
 
@@ -135,6 +148,9 @@ func New(
 	ctrl.ccLister = ccInformer.Lister()
 	ctrl.ccListerSynced = ccInformer.Informer().HasSynced
 
+	ctrl.isLister = isInformer.Lister()
+	ctrl.isListerSynced = isInformer.Informer().HasSynced
+
 	return ctrl
 }
 
@@ -143,7 +159,7 @@ func (ctrl *Controller) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer ctrl.queue.ShutDown()
 
-	if !cache.WaitForCacheSync(stopCh, ctrl.mcpListerSynced, ctrl.mcListerSynced, ctrl.ccListerSynced) {
+	if !cache.WaitForCacheSync(stopCh, ctrl.mcpListerSynced, ctrl.mcListerSynced, ctrl.ccListerSynced, ctrl.isListerSynced) {
 		return
 	}
 
@@ -442,6 +458,35 @@ func (ctrl *Controller) syncMachineConfigPool(key string) error {
 		return nil
 	}
 
+	// If this is our special pool, check to see if we have an image stream
+	// If we do, snarf out the latest image and annotate the pool with it
+	// Trying "pull" based on an enqueue from the image stream informer rather than push
+	if pool.Name == "layered" {
+		// Do we have an image stream
+		is, err := ctrl.imageclient.ImageV1().ImageStreams("openshift-machine-config-operator").Get(context.TODO(), "mco-content-"+pool.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			glog.Warningf("Image stream for %s does not exist (yet?): %s", pool.Name, err)
+		} else {
+
+			// If we do, grab the latest tag
+			for _, tag := range is.Status.Tags {
+				for _, image := range tag.Items {
+					glog.Infof("imagestream %s has rendered: %s", is.Name, image.DockerImageReference)
+
+					// right now I only want the first one
+					if imageReference, ok := pool.Annotations["machineconfiguration.openshift.io/newest-layered-image"]; !ok || imageReference != image.DockerImageReference {
+
+						// Annotate the pool with its most recent image so the daemon can grab it if it wants
+						// TODO(jkyros): should be node controller eventually that would "assign" a node for upgrade, but for now we're confined to a single pool
+						pool.Annotations["machineconfiguration.openshift.io/newest-layered-image"] = image.DockerImageReference
+						ctrl.eventRecorder.Event(pool, corev1.EventTypeNormal, "Updated", "Moved pool "+pool.Name+" to layered image "+image.DockerImageReference)
+						break
+					}
+				}
+			}
+		}
+	}
+
 	selector, err := metav1.LabelSelectorAsSelector(pool.Spec.MachineConfigSelector)
 	if err != nil {
 		return err
@@ -555,11 +600,14 @@ func (ctrl *Controller) syncGeneratedMachineConfig(pool *mcfgv1.MachineConfigPoo
 	// I initially picked here rather than in node-controller because I wasn't sure if we'd need to update OsImageURL or
 	// include special files in our render (e.g. machineconfig-to-ignition, etc)
 	if pool.Name == "layered" {
+
 		glog.Infof("Pool %s is s special pool, rendering config to imagestream", pool.Name)
 		// jkyros: Just put this here for now since it's convenient
 		err = ctrl.experimentalRenderToImagestream(pool, generated)
 		if err != nil {
 			glog.Warningf("Failed to EXPERIMENTALLY render to image stream: %s", err)
+		} else {
+
 		}
 	}
 
@@ -941,4 +989,35 @@ func NewIgnFile(path, contents string) ign3types.File {
 				Source: StrToPtr(dataurl.EncodeBytes([]byte(contents)))},
 		},
 	}
+}
+
+// TODO(jkyros): some quick functions to go with our image stream informer so we can watch imagestream update
+func (ctrl *Controller) addImageStream(obj interface{}) {
+	imagestream := obj.(*imagev1.ImageStream)
+	if imagestream.Namespace == "openshift-machine-config-operator" {
+		glog.Infof("Adding ImageStream %s", imagestream.Name)
+
+		controllerRef := metav1.GetControllerOf(imagestream)
+		if controllerRef != nil {
+			if pool := ctrl.resolveControllerRef(controllerRef); pool != nil {
+				glog.Infof("Imagestream %s changed for %s", imagestream.Name, pool.Name)
+				ctrl.enqueueMachineConfigPool(pool)
+				return
+			}
+		}
+	}
+}
+
+func (ctrl *Controller) updateImageStream(old, cur interface{}) {
+	imagestream := cur.(*imagev1.ImageStream)
+	if imagestream.Namespace == "openshift-machine-config-operator" {
+		glog.Infof("Updating ImageStream %s", imagestream.Name)
+		ctrl.addImageStream(cur)
+	}
+}
+
+func (ctrl *Controller) deleteImageStream(obj interface{}) {
+	imagestream := obj.(*imagev1.ImageStream)
+	glog.Infof("Deleting ImageStream %s", imagestream.Name)
+
 }
