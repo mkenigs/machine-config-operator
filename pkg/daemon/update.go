@@ -473,11 +473,7 @@ func calculatePostConfigChangeAction(diff *machineConfigDiff, diffFileSet []stri
 	return calculatePostConfigChangeActionFromFileDiffs(diffFileSet), nil
 }
 
-// update the node to the provided node configuration.
-func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr error) {
-
-	oldConfig = canonicalizeEmptyMC(oldConfig)
-
+func (dn *Daemon) setWorking() error {
 	if dn.nodeWriter != nil {
 		state, err := getNodeAnnotationExt(dn.node, constants.MachineConfigDaemonStateAnnotationKey, true)
 		if err != nil {
@@ -489,6 +485,14 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr err
 			}
 		}
 	}
+	return nil
+}
+
+// update the node to the provided node configuration.
+func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr error) {
+	if err := dn.setWorking(); err != nil {
+		return fmt.Errorf("failed to set working: %w", err)
+	}
 
 	dn.catchIgnoreSIGTERM()
 	defer func() {
@@ -497,6 +501,7 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr err
 		dn.cancelSIGTERM()
 	}()
 
+	oldConfig = canonicalizeEmptyMC(oldConfig)
 	oldConfigName := oldConfig.GetName()
 	newConfigName := newConfig.GetName()
 
