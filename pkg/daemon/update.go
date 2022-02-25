@@ -555,7 +555,14 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr err
 	}
 
 	// Check and perform node drain if required
-	drain, err := isDrainRequired(actions, diffFileSet, oldIgnConfig, newIgnConfig)
+	readOldFile := func(path string) ([]byte, error) {
+		return ctrlcommon.GetIgnitionFileDataByPath(&oldIgnConfig, path)
+	}
+	readNewFile := func(path string) ([]byte, error) {
+		return ctrlcommon.GetIgnitionFileDataByPath(&newIgnConfig, path)
+	}
+
+	drain, err := isDrainRequired(actions, diffFileSet, readOldFile, readNewFile)
 	if err != nil {
 		return err
 	}
