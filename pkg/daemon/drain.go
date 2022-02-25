@@ -154,11 +154,14 @@ func (dn *Daemon) performDrain() error {
 
 type ReadFileFunc func(string) ([]byte, error)
 
-// isDrainRequired determines whether node drain is required or not to apply config changes.
-func isDrainRequired(actions, diffFileSet []string, readOldFile, readNewFile ReadFileFunc) (bool, error) {
+// drainIfRequired determines whether node drain is required or not to apply config changes and performs the drain if required
+// returns whether drain was attempted
+func (dn *Daemon) drainIfRequired(actions, diffFileSet []string, readOldFile, readNewFile ReadFileFunc) (bool, error) {
+	// For any unhandled cases (although currently there aren't any), default to drain
+	drain := true
 	if ctrlcommon.InSlice(postConfigChangeActionReboot, actions) {
 		// Node is going to reboot, we definitely want to perform drain
-		return true, nil
+		drain = true
 	} else if ctrlcommon.InSlice(postConfigChangeActionReloadCrio, actions) {
 		// Drain may or may not be necessary in case of container registry config changes.
 		if ctrlcommon.InSlice(constants.ContainerRegistryConfPath, diffFileSet) {
@@ -166,14 +169,23 @@ func isDrainRequired(actions, diffFileSet []string, readOldFile, readNewFile Rea
 			if err != nil {
 				return false, err
 			}
-			return !isSafe, nil
+			drain = !isSafe
+		} else {
+			// Other than registries.conf changes, reload crio doesn't require drain
+			drain = false
 		}
-		return false, nil
 	} else if ctrlcommon.InSlice(postConfigChangeActionNone, actions) {
-		return false, nil
+		drain = false
 	}
-	// For any unhandled cases, default to drain
-	return true, nil
+
+	if drain {
+		if err := dn.performDrain(); err != nil {
+			return drain, err
+		}
+	} else {
+		glog.Info("Changes do not require drain, skipping.")
+	}
+	return drain, nil
 }
 
 // isSafeContainerRegistryConfChanges looks inside old and new versions of registries.conf file.

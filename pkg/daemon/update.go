@@ -561,17 +561,8 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr err
 	readNewFile := func(path string) ([]byte, error) {
 		return ctrlcommon.GetIgnitionFileDataByPath(&newIgnConfig, path)
 	}
-
-	drain, err := isDrainRequired(actions, diffFileSet, readOldFile, readNewFile)
-	if err != nil {
+	if _, err := dn.drainIfRequired(actions, diffFileSet, readOldFile, readNewFile); err != nil {
 		return err
-	}
-	if drain {
-		if err := dn.performDrain(); err != nil {
-			return err
-		}
-	} else {
-		glog.Info("Changes do not require drain, skipping.")
 	}
 
 	// update files on disk that need updating

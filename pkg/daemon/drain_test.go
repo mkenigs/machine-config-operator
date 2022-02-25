@@ -12,7 +12,7 @@ import (
 	"github.com/vincent-petithory/dataurl"
 )
 
-func TestIsDrainRequired(t *testing.T) {
+func TestDrainIfRequired(t *testing.T) {
 	machineConfigs := map[string]*mcfgv1.MachineConfig{
 		"mc1": helpers.NewMachineConfig("01-test", nil, "dummy://", []ign3types.File{{
 			Node: ign3types.Node{
@@ -348,6 +348,8 @@ location = "example.com/repo/test-img"
 		},
 	}
 
+	// kubeClient must be nil so that performDrain is a no-op
+	dn := Daemon{}
 	for idx, test := range tests {
 		t.Run(fmt.Sprintf("case#%d", idx), func(t *testing.T) {
 			oldIgnConfig, err := ctrlcommon.ParseAndConvertConfig(test.oldConfig.Spec.Config.Raw)
@@ -359,9 +361,15 @@ location = "example.com/repo/test-img"
 				t.Errorf("parsing new Ignition config failed: %v", err)
 			}
 			diffFileSet := ctrlcommon.CalculateConfigFileDiffs(&oldIgnConfig, &newIgnConfig)
-			drain, err := isDrainRequired(test.actions, diffFileSet, oldIgnConfig, newIgnConfig)
-			if !reflect.DeepEqual(test.expectedAction, drain) {
-				t.Errorf("Failed determining drain behavior: expected: %v but result is: %v. Error: %v", test.expectedAction, drain, err)
+			readOldFile := func(path string) ([]byte, error) {
+				return ctrlcommon.GetIgnitionFileDataByPath(&oldIgnConfig, path)
+			}
+			readNewFile := func(path string) ([]byte, error) {
+				return ctrlcommon.GetIgnitionFileDataByPath(&newIgnConfig, path)
+			}
+			drained, err := dn.drainIfRequired(test.actions, diffFileSet, readOldFile, readNewFile)
+			if !reflect.DeepEqual(test.expectedAction, drained) {
+				t.Errorf("Failed determining drain behavior: expected: %v but result is: %v. Error: %v", test.expectedAction, drained, err)
 			}
 		})
 	}
