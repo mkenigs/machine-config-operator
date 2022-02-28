@@ -157,6 +157,16 @@ func isNodeDone(node *corev1.Node) bool {
 		return false
 	}
 
+	// TODO(jkyros): so this is kind of an either/or sort of thing for now, either you did the image, or you did the image
+	// "You can take the donkey to the top of the mounteain, or you can take the tram, it's the same price" ~ Ron White
+	cimage, hascimage := node.Annotations[daemonconsts.CurrentImageConfigAnnotationKey]
+	dimage, hasdimage := node.Annotations[daemonconsts.DesiredImageConfigAnnotationKey]
+
+	// If we did the image part, may as well check that if we got our annotations right ?
+	if hascimage && hasdimage {
+		return cimage == dimage && isNodeMCDState(node, daemonconsts.MachineConfigDaemonStateDone)
+	}
+
 	return cconfig == dconfig && isNodeMCDState(node, daemonconsts.MachineConfigDaemonStateDone)
 }
 

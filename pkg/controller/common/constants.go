@@ -26,5 +26,7 @@ const (
 	ClusterFeatureInstanceName = "cluster"
 
 	// ExperimentalLayeringPoolLabel defines the label associatied with the experimental layering pool
-	ExperimentalLayeringPoolLabel = "node-role.kubernetes.io/layered"
+	ExperimentalLayeringPoolLabel                               = "node-role.kubernetes.io/layered"
+	ExperimentalNewestLayeredImageAnnotationKey                 = "machineconfiguration.openshift.io/newestImage"
+	ExperimentalNewestLayeredImageEquivalentConfigAnnotationKey = "machineconfiguration.openshift.io/newestImageEquivalentConfig"
 )

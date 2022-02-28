@@ -2014,17 +2014,16 @@ func (dn *Daemon) reboot(rationale string) error {
 	return fmt.Errorf("reboot failed; this error should be unreachable, something is seriously wrong")
 }
 
+// experimentalUpdateLayeredConfig() pretends to do the normal config update for the pool but actually does
+// an image update instead. This function should be completely thrown away.
 func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 
 	// TODO(jkyros): right now you skip drain and reboot, you should do those
 	// TODO(jkyros): config drift should work EXCEPT for the OSImageURL
 
 	// TODO(jkyros): this is awful, but we know we rolled a node event so we can just ignore the configs
-	desiredImage := dn.node.Annotations["machineconfiguration.openshift.io/desired-layered-image"]
-	currentImage := dn.node.Annotations["machineconfiguration.openshift.io/current-layered-image"]
-
-	// This is for the live-apply case that we haven't fully thought through yet
-	liveUpdatedEquivalentTo := dn.node.Annotations["machineconfiguration.openshift.io/live-updated-equivalent-to"]
+	desiredImage := dn.node.Annotations[constants.DesiredImageConfigAnnotationKey]
+	currentImage := dn.node.Annotations[constants.CurrentImageConfigAnnotationKey]
 
 	// Layered doesn't exist right out of the gate right now, it takes some time to reconcile
 	if desiredImage == "" {
@@ -2036,9 +2035,24 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 		// Orrrr....if we've live updated to it
 		glog.Infof("Node is on proper image %s", desiredImage)
 
-	} else if liveUpdatedEquivalentTo == desiredImage {
-		glog.Info("No need to update, live update is equivalent")
+		glog.Infof("Completing pending config %s", currentImage)
+		if err := dn.completeUpdate(currentImage); err != nil {
+			MCDUpdateState.WithLabelValues("", err.Error()).SetToCurrentTime()
+
+		}
+
+		// TODO(jkyros): For now I'm just making the pool happy so it's like "yeah I'm done"
+		if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
+			errLabelStr := fmt.Sprintf("error setting node's state to Done: %v", err)
+			MCDUpdateState.WithLabelValues("", errLabelStr).SetToCurrentTime()
+			return nil
+		}
+
+		//glog.Infof("In desired config %s", state.currentConfig.GetName())
+		//MCDUpdateState.WithLabelValues(state.currentConfig.GetName(), "").SetToCurrentTime()
+
 	} else {
+		// We think we have work to do
 
 		client := &RpmOstreeClient{}
 		state, err := client.GetState()
@@ -2052,12 +2066,21 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 		// ughhhh it really should be transactional
 
 		for _, deployment := range state.Deployments {
+
 			// What we're looking for is at least in the list
 			if strings.TrimPrefix(deployment.ContainerImageReference, "ostree-unverified-registry:") == desiredImage {
 				// We rebased but we haven't booted, might be a liveapply
 				if deployment.Staged == true {
 					//TODO(jkyros): Check to see about liveapply
 					glog.Infof("Node is staged to %s, checking to see if we've liveapplied", desiredImage)
+
+					// For now we're just setting done because we know this worked, haven't gotten to reboot logic yet
+					if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
+						errLabelStr := fmt.Sprintf("error setting node's state to Done: %v", err)
+						MCDUpdateState.WithLabelValues("", errLabelStr).SetToCurrentTime()
+						return nil
+					}
+
 					return nil
 				}
 
@@ -2065,9 +2088,18 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 				if deployment.Booted == true {
 					glog.Infof("Node is already in image %s", desiredImage)
 					//TODO(jkyros): Add an annotation
+
+					// For now we're just setting done because we know this worked, haven't gotten to reboot logic yet
+					if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
+						errLabelStr := fmt.Sprintf("error setting node's state to Done: %v", err)
+						MCDUpdateState.WithLabelValues("", errLabelStr).SetToCurrentTime()
+						return nil
+					}
+
 					return nil
 				}
 			}
+
 		}
 
 		pullSecret, err := dn.GetPullSecret()

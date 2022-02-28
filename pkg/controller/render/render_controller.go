@@ -46,6 +46,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
 
 	ign3types "github.com/coreos/ignition/v2/config/v3_2/types"
 )
@@ -471,17 +473,43 @@ func (ctrl *Controller) syncMachineConfigPool(key string) error {
 			// If we do, grab the latest tag
 			for _, tag := range is.Status.Tags {
 				for _, image := range tag.Items {
-					glog.Infof("imagestream %s has rendered: %s", is.Name, image.DockerImageReference)
 
-					// right now I only want the first one
-					if imageReference, ok := pool.Annotations["machineconfiguration.openshift.io/newest-layered-image"]; !ok || imageReference != image.DockerImageReference {
-
-						// Annotate the pool with its most recent image so the daemon can grab it if it wants
+					// If this is different than our current tag, grab it and annotate the pool
+					if imageReference, ok := pool.Annotations[ctrlcommon.ExperimentalNewestLayeredImageAnnotationKey]; !ok || imageReference != image.DockerImageReference {
+						glog.Infof("imagestream %s newest is: %s", is.Name, image.DockerImageReference)
+						// Annotate the pool with its most recent image so node-controller can use it
 						// TODO(jkyros): should be node controller eventually that would "assign" a node for upgrade, but for now we're confined to a single pool
-						pool.Annotations["machineconfiguration.openshift.io/newest-layered-image"] = image.DockerImageReference
+						pool.Annotations[ctrlcommon.ExperimentalNewestLayeredImageAnnotationKey] = image.DockerImageReference
+
+						// get the actual image so we can read its labels
+						fullImage, err := ctrl.imageclient.ImageV1().Images().Get(context.TODO(), image.Image, metav1.GetOptions{})
+						if err != nil {
+							return err
+						}
+
+						// We need the labels out of the docker image but it's a raw extension
+						dockerLabels := struct {
+							Config struct {
+								Labels map[string]string `json:"Labels"`
+							} `json:"Config"`
+						}{}
+
+						// Get the labels out and see what config this is
+						err = json.Unmarshal(fullImage.DockerImageMetadata.Raw, &dockerLabels)
+						if err != nil {
+							glog.Warningf("Could not get labels from docker image metadata: %s", err)
+						}
+
+						// Tag what config this came from so we know it's the right image
+						if machineconfig, ok := dockerLabels.Config.Labels["machineconfig"]; ok {
+							pool.Annotations[ctrlcommon.ExperimentalNewestLayeredImageEquivalentConfigAnnotationKey] = machineconfig
+						}
+
 						ctrl.eventRecorder.Event(pool, corev1.EventTypeNormal, "Updated", "Moved pool "+pool.Name+" to layered image "+image.DockerImageReference)
-						break
+
 					}
+					// TODO(jkyros): right now I only want the first one, this should probably just be be is.Status.Tags[0] instead of the loop
+					break
 				}
 			}
 		}
@@ -735,6 +763,9 @@ func (ctrl *Controller) experimentalAddBuildConfigs(pool *mcfgv1.MachineConfigPo
 	RUN ignition-liveapply /etc/mco-content-ignition.json
 	#This tells me there are no configured repos? hmmmm
 	#RUN rpm-ostree ex rebuild && rm -rf /var/cache /etc/rpm-ostree/origin.d
+	ARG machineconfig=unknown
+	#Injected from mcc's buildrequest so we can use it later
+	LABEL machineconfig=$machineconfig
 	`
 
 	// TODO(jkyros): ownerships!
@@ -754,7 +785,11 @@ func (ctrl *Controller) experimentalAddBuildConfigs(pool *mcfgv1.MachineConfigPo
 			},
 			Spec: buildv1.BuildConfigSpec{
 				// Trigger when our "machineconfig" image gets updated on a render
-				Triggers: []buildv1.BuildTriggerPolicy{
+
+				// NOTE(jkyros): I took this out because we're triggering manually now
+				// I had to so that we could get the metadata in there. If we can find another way
+				// to capture the metadata, the imagestream could do the triggering
+				/*	Triggers: []buildv1.BuildTriggerPolicy{
 					{
 						ImageChange: &buildv1.ImageChangeTrigger{
 							From: &corev1.ObjectReference{
@@ -765,7 +800,7 @@ func (ctrl *Controller) experimentalAddBuildConfigs(pool *mcfgv1.MachineConfigPo
 						},
 						Type: buildv1.ImageChangeBuildTriggerType,
 					},
-				},
+				}, */
 				RunPolicy: "Serial",
 				// Simple dockerfile build, just the text from above
 				CommonSpec: buildv1.CommonSpec{
@@ -827,6 +862,7 @@ func (ctrl *Controller) experimentalRenderToImagestream(pool *mcfgv1.MachineConf
 	// And also, an imagestream to receive our "coreos-derive" build image
 	contentImageStreamName := fmt.Sprintf("mco-content-%s", pool.Name)
 
+	// Our list of imagestreams we need to ensure exists
 	var ensureImageStreams = []string{renderedImageStreamName, contentImageStreamName, "coreos"}
 
 	glog.V(2).Infof("Ensuring image streams exist for pool %s", pool.Name)
@@ -934,6 +970,11 @@ func (ctrl *Controller) experimentalRenderToImagestream(pool *mcfgv1.MachineConf
 		glog.Warningf("Failed to create image layer: %s", err)
 	}
 
+	// Stuff a label in to see what happens when we build
+	newImg, err = mutate.Config(newImg, v1.Config{
+		Labels: map[string]string{"jkyros": "testing", "machineconfig": generated.Name},
+	})
+
 	// Tag it so we can push it into the integrated registry
 	// I added a RoleBinding manifest that gives us permission to push to the repo with our service account
 	contentTag := path.Join("image-registry.openshift-image-registry.svc:5000", targetNamespace, renderedImageStreamName)
@@ -963,6 +1004,37 @@ func (ctrl *Controller) experimentalRenderToImagestream(pool *mcfgv1.MachineConf
 		return fmt.Errorf("Failed to push image %s: %s", tag.String(), err)
 	} else {
 		glog.Infof("Image %s successfully pushed.", tag.String())
+	}
+
+	// TODO(jkyros): I wonder if I can use an EnvVarSource here and reference something without having to stuff this in
+	var whichConfig = corev1.EnvVar{
+		Name:  "machineconfig",
+		Value: generated.Name,
+	}
+
+	// create a buildconfigrequest to trigger the build because if we let the imagestream do it on its own,
+	// it won't have any of the metadata, and we can't be sure which image is which
+	// It looks like the imagetag object that comes out will let me see the labels and the env, so I could just stuff it in env but that seems hacky
+	// TODO(jkyros): If you skip the buildconfig and just make this a build, then I think you can just supply the labels,
+	// but then nobody can see the buildconfig?
+	br := &buildv1.BuildRequest{
+		//TypeMeta:    metav1.TypeMeta{},
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("mco-build-content-%s", pool.Name)},
+		//Revision:    &buildv1.SourceRevision{},
+		//Env: []corev1.EnvVar{whichConfig},
+		TriggeredBy: []buildv1.BuildTriggerCause{
+			{Message: "The machine config controller"},
+		},
+		DockerStrategyOptions: &buildv1.DockerStrategyOptions{
+			BuildArgs: []corev1.EnvVar{whichConfig},
+			//NoCache:   new(bool),
+		},
+	}
+
+	// Trigger our build manually, we don't have to wait, the pool will figure it out when it's available
+	_, err = ctrl.buildclient.BuildV1().BuildConfigs(targetNamespace).Instantiate(context.TODO(), br.Name, br, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("Failed to trigger image build build: %s", err)
 	}
 
 	// After the image gets pushed, because of the image triggers, the buildconfigs will do their builds automatically

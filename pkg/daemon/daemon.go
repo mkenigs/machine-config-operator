@@ -486,11 +486,6 @@ func (dn *Daemon) syncNode(key string) error {
 			return err
 		}
 
-		// Hack in our layered node workflow for this magic pool
-		if _, ok := dn.node.Labels[ctrlcommon.ExperimentalLayeringPoolLabel]; ok {
-			return dn.experimentalUpdateLayeredConfig()
-		}
-
 		if err := dn.triggerUpdateWithMachineConfig(current, desired); err != nil {
 			return err
 		}
@@ -1497,6 +1492,11 @@ func (dn *Daemon) triggerUpdateWithMachineConfig(currentConfig, desiredConfig *m
 	// Shut down the Config Drift Monitor since we'll be performing an update
 	// and the config will "drift" while the update is occurring.
 	dn.stopConfigDriftMonitor()
+
+	// Hack in our layered node workflow for this magic pool
+	if _, ok := dn.node.Labels[ctrlcommon.ExperimentalLayeringPoolLabel]; ok {
+		return dn.experimentalUpdateLayeredConfig()
+	}
 
 	// run the update process. this function doesn't currently return.
 	return dn.update(currentConfig, desiredConfig)

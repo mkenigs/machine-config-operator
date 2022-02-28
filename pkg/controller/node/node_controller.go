@@ -843,6 +843,40 @@ func (ctrl *Controller) setClusterConfigAnnotation(nodes []*corev1.Node) error {
 	return nil
 }
 
+func (ctrl *Controller) setDesiredImageAnnotation(nodeName, currentImage string) error {
+	return clientretry.RetryOnConflict(constants.NodeUpdateBackoff, func() error {
+		oldNode, err := ctrl.kubeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		oldData, err := json.Marshal(oldNode)
+		if err != nil {
+			return err
+		}
+
+		newNode := oldNode.DeepCopy()
+		if newNode.Annotations == nil {
+			newNode.Annotations = map[string]string{}
+		}
+
+		if newNode.Annotations[daemonconsts.DesiredImageConfigAnnotationKey] == currentImage {
+			return nil
+		}
+		newNode.Annotations[daemonconsts.DesiredImageConfigAnnotationKey] = currentImage
+		newData, err := json.Marshal(newNode)
+		if err != nil {
+			return err
+		}
+
+		patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, corev1.Node{})
+		if err != nil {
+			return fmt.Errorf("failed to create patch for node %q: %v", nodeName, err)
+		}
+		_, err = ctrl.kubeClient.CoreV1().Nodes().Patch(context.TODO(), nodeName, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+		return err
+	})
+}
+
 func (ctrl *Controller) setDesiredMachineConfigAnnotation(nodeName, currentConfig string) error {
 	return clientretry.RetryOnConflict(constants.NodeUpdateBackoff, func() error {
 		oldNode, err := ctrl.kubeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
@@ -965,10 +999,22 @@ func (ctrl *Controller) updateCandidateMachines(pool *mcfgv1.MachineConfigPool, 
 	}
 	targetConfig := pool.Spec.Configuration.Name
 	for _, node := range candidates {
+
+		// If our pool is annotated with a new image, then tag the node with an image in addition to amachineconfig
+		if targetImage, ok := pool.Annotations[ctrlcommon.ExperimentalNewestLayeredImageAnnotationKey]; ok && pool.Name == "layered" {
+			ctrl.logPool(pool, "Setting node %s target image to %s", node.Name, targetImage)
+			if err := ctrl.setDesiredImageAnnotation(node.Name, targetImage); err != nil {
+				return goerrs.Wrapf(err, "setting desired config for node %s", node.Name)
+			}
+
+		}
+
+		// TODO(jkyros): right now you have to let it set the config too, otherwise you get stuck
 		ctrl.logPool(pool, "Setting node %s target to %s", node.Name, targetConfig)
 		if err := ctrl.setDesiredMachineConfigAnnotation(node.Name, targetConfig); err != nil {
 			return goerrs.Wrapf(err, "setting desired config for node %s", node.Name)
 		}
+
 	}
 	if len(candidates) == 1 {
 		candidate := candidates[0]
