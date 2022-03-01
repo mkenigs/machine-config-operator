@@ -240,22 +240,8 @@ func (r *RpmOstreeClient) Rebase(imgURL, osImageContentDir string) (changed bool
 		ostreeCsum    string
 		ostreeVersion string
 	)
-	defaultDeployment, err := r.GetBootedDeployment()
-	if err != nil {
-		return
-	}
 
-	previousPivot := ""
-	if len(defaultDeployment.CustomOrigin) > 0 {
-		if strings.HasPrefix(defaultDeployment.CustomOrigin[0], "pivot://") {
-			previousPivot = defaultDeployment.CustomOrigin[0][len("pivot://"):]
-			glog.Infof("Previous pivot: %s", previousPivot)
-		} else {
-			glog.Infof("Previous custom origin: %s", defaultDeployment.CustomOrigin[0])
-		}
-	} else {
-		glog.Info("Current origin is not custom")
-	}
+	r.logCustomOrigin()
 
 	var imageData *types.ImageInspectInfo
 	if imageData, err = imageInspect(imgURL); err != nil {
@@ -326,14 +312,7 @@ func (r *RpmOstreeClient) Rebase(imgURL, osImageContentDir string) (changed bool
 	return
 }
 
-// Rebase potentially rebases system if not already rebased.
-func (r *RpmOstreeClient) RebaseLayered(imgURL string, pullSecret []byte) (err error) {
-	err = ioutil.WriteFile(ostreeAuthFile, pullSecret, 0400)
-	if err != nil {
-		return
-	}
-	defer os.Remove(ostreeAuthFile)
-
+func (r *RpmOstreeClient) logCustomOrigin() {
 	defaultDeployment, err := r.GetBootedDeployment()
 	if err != nil {
 		return
@@ -350,6 +329,15 @@ func (r *RpmOstreeClient) RebaseLayered(imgURL string, pullSecret []byte) (err e
 	} else {
 		glog.Info("Current origin is not custom")
 	}
+}
+
+// RebaseLayered potentially rebases system if not already rebased.
+func (r *RpmOstreeClient) RebaseLayered(imgURL string, pullSecret []byte) (err error) {
+	err = ioutil.WriteFile(ostreeAuthFile, pullSecret, 0400)
+	if err != nil {
+		return
+	}
+	defer os.Remove(ostreeAuthFile)
 
 	glog.Infof("Executing rebase to %s", imgURL)
 	args := []string{"rebase", "--experimental", "ostree-unverified-registry:" + imgURL}
