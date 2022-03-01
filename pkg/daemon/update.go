@@ -2120,7 +2120,7 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 }
 
 func (dn *Daemon) GetPullSecret() ([]byte, error) {
-	var targetNamespace = "openshift-machine-config-operator"
+	var targetNamespace = ctrlcommon.MCONamespace
 
 	// Get the service accoutn
 	mcdServiceAccount, err := dn.kubeClient.CoreV1().ServiceAccounts(targetNamespace).Get(context.TODO(), "machine-config-daemon", metav1.GetOptions{})
