@@ -2024,6 +2024,7 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 	// TODO(jkyros): this is awful, but we know we rolled a node event so we can just ignore the configs
 	desiredImage := dn.node.Annotations[constants.DesiredImageConfigAnnotationKey]
 	currentImage := dn.node.Annotations[constants.CurrentImageConfigAnnotationKey]
+	desiredConfig := dn.node.Annotations[constants.DesiredMachineConfigAnnotationKey]
 
 	// Layered doesn't exist right out of the gate right now, it takes some time to reconcile
 	if desiredImage == "" {
@@ -2088,14 +2089,6 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 				if deployment.Booted == true {
 					glog.Infof("Node is already in image %s", desiredImage)
 					//TODO(jkyros): Add an annotation
-
-					// For now we're just setting done because we know this worked, haven't gotten to reboot logic yet
-					if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
-						errLabelStr := fmt.Sprintf("error setting node's state to Done: %v", err)
-						MCDUpdateState.WithLabelValues("", errLabelStr).SetToCurrentTime()
-						return nil
-					}
-
 					return nil
 				}
 			}
@@ -2121,6 +2114,11 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 		}
 
 		//defer os.Unlink("/run/ostree/auth.json")
+		if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
+			errLabelStr := fmt.Sprintf("error setting node's state to Done: %v", err)
+			MCDUpdateState.WithLabelValues("", errLabelStr).SetToCurrentTime()
+			return nil
+		}
 
 	}
 

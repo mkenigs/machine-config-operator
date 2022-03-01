@@ -725,6 +725,14 @@ func (ctrl *Controller) syncMachineConfigPool(key string) error {
 		return nil
 	}
 
+	// TODO(jkyros): so right here I think we check to see
+	// Is this the layered pool
+	// If it is the layered pool, then check to see if we have a matchy-matchy image annotation
+	// IF we do, then we can continue
+	// IF we don't, we wait for the image renderer to requeue the pool when it's done rendering
+	// THEN we add the annotations
+	//
+
 	// Deep-copy otherwise we are mutating our cache.
 	// TODO: Deep-copy only when needed.
 	pool := machineconfigpool.DeepCopy()
@@ -743,6 +751,14 @@ func (ctrl *Controller) syncMachineConfigPool(key string) error {
 		if mcfgv1.IsMachineConfigPoolConditionTrue(pool.Status.Conditions, mcfgv1.MachineConfigPoolUpdating) {
 			glog.Infof("Pool %s is paused and will not update.", pool.Name)
 		}
+		return ctrl.syncStatusOnly(pool)
+	}
+
+	// If our image isn't cooked yet, don't do anything.
+	targetImage, equivalentTo, isImagePool, targetImageMatchesConfig := ctrl.experimentalHasValidImage(pool)
+	// If we are waiting for our proper image to render/get assigned
+	if isImagePool && !targetImageMatchesConfig {
+		glog.Infof("Target image %s (%s) does not match target config %s. Skipping pool %s for now.", targetImage, equivalentTo, pool.Spec.Configuration.Name, pool.Name)
 		return ctrl.syncStatusOnly(pool)
 	}
 
@@ -1000,13 +1016,18 @@ func (ctrl *Controller) updateCandidateMachines(pool *mcfgv1.MachineConfigPool, 
 	targetConfig := pool.Spec.Configuration.Name
 	for _, node := range candidates {
 
-		// If our pool is annotated with a new image, then tag the node with an image in addition to amachineconfig
-		if targetImage, ok := pool.Annotations[ctrlcommon.ExperimentalNewestLayeredImageAnnotationKey]; ok && pool.Name == "layered" {
+		// Check image details for this pool
+		targetImage, equivalentTo, isImagePool, targetImageMatchesConfig := ctrl.experimentalHasValidImage(pool)
+
+		// If our pool is annotated with an image AND that image is the right image, then update these nodes with it
+		if isImagePool && targetImageMatchesConfig {
 			ctrl.logPool(pool, "Setting node %s target image to %s", node.Name, targetImage)
 			if err := ctrl.setDesiredImageAnnotation(node.Name, targetImage); err != nil {
 				return goerrs.Wrapf(err, "setting desired config for node %s", node.Name)
 			}
 
+		} else {
+			glog.Infof("Image %s matched %s not %s. Proper image may not have rendered yet", targetImage, equivalentTo, targetConfig)
 		}
 
 		// TODO(jkyros): right now you have to let it set the config too, otherwise you get stuck
@@ -1087,4 +1108,34 @@ func getErrorString(err error) string {
 		return err.Error()
 	}
 	return ""
+}
+
+// experimentalHasValidImage checks the state of the pool annotations assigned by render_controller to see if our image is done rendering
+// and it's the proper image to apply to this pool. This is used to make sure we don't assign a config to a node too early and have it take the non-image
+// path because all it got was a machineconfig.
+func (ctrl *Controller) experimentalHasValidImage(pool *mcfgv1.MachineConfigPool) (targetImage, equivalentTo string, isImagePool, targetImageMatchesConfig bool) {
+
+	var hasTargetImage bool
+	// The image that's currently the latest in the image stream
+	targetImage, hasTargetImage = pool.Annotations[ctrlcommon.ExperimentalNewestLayeredImageAnnotationKey]
+	// Which machineconfig it's "equivalent" to
+	equivalentTo, hasEquivalentTo := pool.Annotations[ctrlcommon.ExperimentalNewestLayeredImageEquivalentConfigAnnotationKey]
+
+	// TODO(jkyros): Flag or something later, this is just for now
+
+	// If this is the layered pool, it needs an image
+	if pool.Name == "layered" {
+		isImagePool = true
+	}
+
+	// If it has these, we know it's cooked at least one image, but it might be the previous one, and
+	// the new one might still be rendering
+	if hasTargetImage && hasEquivalentTo {
+		// But if it matches our machineconfig, we know it's the right one
+		if equivalentTo == pool.Spec.Configuration.Name {
+			targetImageMatchesConfig = true
+		}
+	}
+	return
+
 }
