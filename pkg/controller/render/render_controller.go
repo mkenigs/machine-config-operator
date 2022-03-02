@@ -753,22 +753,37 @@ func (ctrl *Controller) experimentalAddBuildConfigs(pool *mcfgv1.MachineConfigPo
 
 	// Multistage build, butane is optional (the [l] character class makes it a 'wildcard' and it won't fail if it doesn't exist)
 	var dockerFile = `
+	# Multistage build, we need to grab the files from our config imagestream 
 	FROM image-registry.openshift-image-registry.svc:5000/openshift-machine-config-operator/rendered-layered AS machineconfig
+	
+	# We're actually basing on the "new format" image from the coreos base image stream 
 	FROM image-registry.openshift-image-registry.svc:5000/openshift-machine-config-operator/coreos
-	#You'd think this would work, but it doesn't in a buildconfig
-	#COPY --from=machineconfig /mco-butane.yaml* /etc/
+
+	# Pull in the files from our machineconfig stage 
 	COPY --from=machineconfig /machineconfig.json /etc/mco-content-machineconfig.json
 	COPY --from=machineconfig /ignition.json /etc/mco-content-ignition.json
+
+	# Apply the config to the host 
 	ENV container=1
 	RUN ignition-liveapply /etc/mco-content-ignition.json
-	#This tells me there are no configured repos? hmmmm
-	#RUN rpm-ostree ex rebuild && rm -rf /var/cache /etc/rpm-ostree/origin.d
+
+	# I dropped some repos and some butane in my machineconfig to make this work 
+	# Render butane into ignition that ignition-liveapply can apply 
+	RUN butane --pretty --strict /etc/mco-butane.yaml -o /etc/mco-butane.json 
+
+	# Apply the butane-rendered ignition so it ends up in origin.d 
+	RUN ignition-liveapply /etc/mco-butane.json 
+
+	# Rebuild origin.d (I included an /etc/yum.repos.d/ file in my machineconfig so it could find the RPMS, that's why this works)
+	RUN rpm-ostree ex rebuild && rm -rf /var/cache /etc/rpm-ostree/origin.d
+
+
+	# This is so we can get the machineconfig injected
 	ARG machineconfig=unknown
-	#Injected from mcc's buildrequest so we can use it later
+	# Apply the injected machineconfig name as a label so node_controller can check it
 	LABEL machineconfig=$machineconfig
 	`
 
-	// TODO(jkyros): ownerships!
 	_, err := ctrl.buildclient.BuildV1().BuildConfigs(targetNamespace).Get(context.TODO(), buildConfigName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 
@@ -859,11 +874,25 @@ func (ctrl *Controller) experimentalRenderToImagestream(pool *mcfgv1.MachineConf
 
 	// Make sure we have an image stream to render content into
 	renderedImageStreamName := fmt.Sprintf("rendered-%s", pool.Name)
+
 	// And also, an imagestream to receive our "coreos-derive" build image
 	contentImageStreamName := fmt.Sprintf("mco-content-%s", pool.Name)
 
+	// And allow for the user to specify some stuff afterwards
+	customImageStreamName := fmt.Sprintf("mco-content-custom-%s", pool.Name)
+
+	// And then if we're crazy, allow for an external image
+	// TODO(jkyros): there is obviously some stuff in machineconfig from templates that
+	externalImageStreamName := fmt.Sprintf("mco-content-external-%s", pool.Name)
+
 	// Our list of imagestreams we need to ensure exists
-	var ensureImageStreams = []string{renderedImageStreamName, contentImageStreamName, "coreos"}
+	var ensureImageStreams = []string{
+		renderedImageStreamName,
+		contentImageStreamName,
+		customImageStreamName,
+		externalImageStreamName,
+		"coreos",
+	}
 
 	glog.V(2).Infof("Ensuring image streams exist for pool %s", pool.Name)
 	// TODO(jkyros): This should probably be a controller thing somewhere
@@ -957,10 +986,12 @@ func (ctrl *Controller) experimentalRenderToImagestream(pool *mcfgv1.MachineConf
 
 	// Lol I know, let's make this more compicated with nesting
 	// Add the butane to the image if we have some in our machineconfig
-	extractedButane, err := ctrlcommon.GetIgnitionFileDataByPath(&ignConf, "/etc/mco-butane.yaml")
-	if err == nil && extractedButane != nil {
-		fileMap["/butane.yaml"] = extractedButane
-	}
+
+	/*
+		extractedButane, err := ctrlcommon.GetIgnitionFileDataByPath(&ignConf, "/etc/mco-butane.yaml")
+		if err == nil && extractedButane != nil {
+			fileMap["/mco-butane.yaml"] = extractedButane
+		}*/
 
 	// This is essentially "FROM scratch"
 	// ADD /machineconfig.json
