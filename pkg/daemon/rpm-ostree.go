@@ -419,6 +419,12 @@ func (r *RpmOstreeClient) RebaseLayered(imgURL string, pullSecret []byte) (err e
 	return runRpmOstree(args...)
 }
 
+func (r *RpmOstreeClient) ApplyLive() (err error) {
+	glog.Infof("Calling apply-live")
+
+	return runRpmOstree("ex", "apply-live", "--allow-replacement")
+}
+
 // allows unit testing
 var execCommand = exec.Command
 
