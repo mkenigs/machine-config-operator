@@ -29,6 +29,8 @@ const (
 
 	// rpmOstreeVersionMinimum is the minimum required version
 	rpmOstreeVersionMinimum = "2021.14"
+
+	ostreeAuthFile = "/run/ostree/auth.json"
 )
 
 // rpmOstreeVersionOuter is YAML output by `rpm-ostree --version`
@@ -302,7 +304,7 @@ func podmanInspect(imgURL string) (imgdata *imageInspection, err error) {
 
 }
 
-// Rebase potentially rebases system if not already rebased.
+// Rebase potentially rebases the system to the image in osImageContentDir if not already rebased.
 func (r *RpmOstreeClient) Rebase(imgURL, osImageContentDir string) (changed bool, err error) {
 	var (
 		ostreeCsum    string
@@ -395,7 +397,12 @@ func (r *RpmOstreeClient) Rebase(imgURL, osImageContentDir string) (changed bool
 }
 
 // Rebase potentially rebases system if not already rebased.
-func (r *RpmOstreeClient) RebaseLayered(imgURL string) (changed bool, err error) {
+func (r *RpmOstreeClient) RebaseLayered(imgURL string, pullSecret []byte) (err error) {
+	err = ioutil.WriteFile(ostreeAuthFile, pullSecret, 0400)
+	if err != nil {
+		return
+	}
+	defer os.Remove(ostreeAuthFile)
 
 	defaultDeployment, err := r.GetBootedDeployment()
 	if err != nil {
@@ -421,12 +428,7 @@ func (r *RpmOstreeClient) RebaseLayered(imgURL string) (changed bool, err error)
 	args := []string{"rebase", "--experimental", "ostree-unverified-registry:" + imgURL,
 		"--custom-origin-url", customURL, "--custom-origin-description", "Layered image managed by machine-config-operator"}
 
-	if err = runRpmOstree(args...); err != nil {
-		return
-	}
-
-	changed = true
-	return
+	return runRpmOstree(args...)
 }
 
 // allows unit testing
