@@ -2024,16 +2024,11 @@ func (dn *Daemon) reboot(rationale string) error {
 }
 
 func (dn *Daemon) experimentalUpdateLayeredConfig() error {
-
-	// TODO(jkyros): right now you skip drain and reboot, you should do those
 	// TODO(jkyros): config drift should work EXCEPT for the OSImageURL
 
 	// TODO(jkyros): this is awful, but we know we rolled a node event so we can just ignore the configs
 	desiredImage := dn.node.Annotations["machineconfiguration.openshift.io/desired-layered-image"]
 	currentImage := dn.node.Annotations["machineconfiguration.openshift.io/current-layered-image"]
-
-	// This is for the live-apply case that we haven't fully thought through yet
-	liveUpdatedEquivalentTo := dn.node.Annotations["machineconfiguration.openshift.io/live-updated-equivalent-to"]
 
 	// Layered doesn't exist right out of the gate right now, it takes some time to reconcile
 	if desiredImage == "" {
@@ -2041,42 +2036,16 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 		return nil
 	}
 
+	// currentImage == desiredImage is equivalent to:
+	// booted.ContainerImageReference == desiredImage && staged.ID == "" && booted.LiveReplaced == ""
+	// ||
+	// staged.ContainerImageReference == desiredImage && booted.LiveReplaced == staged.Checksum
 	if currentImage == desiredImage {
-		// Orrrr....if we've live updated to it
 		glog.Infof("Node is on proper image %s", desiredImage)
-
-	} else if liveUpdatedEquivalentTo == desiredImage {
-		glog.Info("No need to update, live update is equivalent")
 	} else {
-
-		client := &RpmOstreeClient{}
-		state, err := client.GetState()
-		if err != nil {
-			return err
-		}
-
-		// Look through our deployments
-		// If we've rebased to it, but not booted, that's okay IF we've live-applied
-		// but we need to know whether we're live applying when we rebase
-		// ughhhh it really should be transactional
-
-		for _, deployment := range state.Deployments {
-			// What we're looking for is at least in the list
-			if strings.TrimPrefix(deployment.ContainerImageReference, "ostree-unverified-registry:") == desiredImage {
-				// We rebased but we haven't booted, might be a liveapply
-				if deployment.Staged == true {
-					//TODO(jkyros): Check to see about liveapply
-					glog.Infof("Node is staged to %s, checking to see if we've liveapplied", desiredImage)
-					return nil
-				}
-
-				// Everything is perfect, we're already there the good way
-				if deployment.Booted == true {
-					glog.Infof("Node is already in image %s", desiredImage)
-					//TODO(jkyros): Add an annotation
-					return nil
-				}
-			}
+		// At this point we know we need to rebase
+		if err := dn.setWorking(); err != nil {
+			return fmt.Errorf("failed to set working: %w", err)
 		}
 
 		pullSecret, err := dn.GetPullSecret()
@@ -2084,38 +2053,71 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 			return err
 		}
 
-		//TODO(jkyros): what should these perms be
-		os.Mkdir("/run/ostree", 0544)
+		// TODO drop NodeUpdaterClient or change its interface
+		client := &RpmOstreeClient{}
+		if err := client.RebaseLayered(desiredImage, pullSecret); err != nil {
+			return err
+		}
 
-		err = ioutil.WriteFile("/run/ostree/auth.json", pullSecret, 0400)
+		// Ideally we would want to update kernelArguments only via MachineConfigs.
+		// We are keeping this to maintain compatibility and OKD requirement.
+		if err := UpdateTuningArgs(KernelTuningFile, CmdLineFile); err != nil {
+			return err
+		}
+
+		state, err := client.GetState()
 		if err != nil {
 			return err
 		}
 
-		_, err = client.RebaseLayered(desiredImage)
-		if err != nil {
-			return err
+		var staged Deployment
+		var booted Deployment
+		for _, deployment := range state.Deployments {
+			if deployment.Staged {
+				staged = deployment
+			}
+			if deployment.Booted {
+				booted = deployment
+			}
+		}
+		var activeChecksum string
+		if booted.LiveReplaced != "" {
+			activeChecksum = booted.LiveReplaced
+		} else {
+			activeChecksum = booted.Checksum
 		}
 
-		//defer os.Unlink("/run/ostree/auth.json")
+		// I'm not sure if it's possible to get to such a state, but if staged was different than booted or LiveReplaced before this method was called,
+		// then it's possible activeChecksum == staged.Checksum
+		if activeChecksum != staged.Checksum {
+			diffFileSet, err := Diff(activeChecksum, staged.Checksum)
+			if err != nil {
+				return fmt.Errorf("failed to diff container images: %w", err)
+			}
+			actions, err := dn.calculatePostConfigChangeActionFromFiles(diffFileSet)
+			if err != nil {
+				return err
+			}
 
+			// Check and perform node drain if required
+			readOldFile := func(path string) ([]byte, error) {
+				return Cat(booted.Osname, activeChecksum, path)
+			}
+			readNewFile := func(path string) ([]byte, error) {
+				return Cat(staged.Osname, staged.Checksum, path)
+			}
+			if _, err := dn.drainIfRequired(actions, diffFileSet, readOldFile, readNewFile); err != nil {
+				return err
+			}
+
+			if !ctrlcommon.InSlice(postConfigChangeActionReboot, actions) {
+				client.ApplyLive()
+			}
+			if err := dn.performPostConfigChangeAction(actions, desiredImage); err != nil {
+				return err
+			}
+		}
 	}
-
-	// 	get the image from the host
-	// see if it's the one in spec config
-	// if it's not, then we need to
-	// 0.) run the rules engine on it to see if we can live-apply this
-	// 1.) if we can, do that
-	// 2;) but how do we signal that we did that? Rebase anyway, but don't boot?
-	// 3.) I mean that's what liveapply does so I guess if we trust it it's cool? we can come back?
-	// so then we just check it to see if it's either in, or pending + delta both are okay
-	// 1.) copy the auth to the local host
-	// 2.) rebase to it
-
-	//deployment := client.GetBootedDeployment()
-	//osImageUrl := client.GetBootedOSImageURL()
-	//os
-
 	return nil
 }
 
