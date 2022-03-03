@@ -2117,6 +2117,9 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 				return err
 			}
 		}
+		if dn.recorder != nil {
+			dn.recorder.Eventf(getNodeRef(dn.node), corev1.EventTypeNormal, "NodeDone", fmt.Sprintf("Setting node %s, currentConfig %s to Done", dn.node.Name, desiredImage))
+		}
 	}
 	return nil
 }
