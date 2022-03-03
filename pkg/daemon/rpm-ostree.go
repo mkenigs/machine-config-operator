@@ -23,6 +23,8 @@ const (
 	numRetriesNetCommands = 5
 	// Pull secret.  Written by the machine-config-operator
 	kubeletAuthFile = "/var/lib/kubelet/config.json"
+
+	ostreeAuthFile = "/run/ostree/auth.json"
 )
 
 // rpmOstreeState houses zero or more RpmOstreeDeployments
@@ -232,7 +234,7 @@ func podmanInspect(imgURL string) (imgdata *imageInspection, err error) {
 
 }
 
-// Rebase potentially rebases system if not already rebased.
+// Rebase potentially rebases the system to the image in osImageContentDir if not already rebased.
 func (r *RpmOstreeClient) Rebase(imgURL, osImageContentDir string) (changed bool, err error) {
 	var (
 		ostreeCsum    string
@@ -325,7 +327,12 @@ func (r *RpmOstreeClient) Rebase(imgURL, osImageContentDir string) (changed bool
 }
 
 // Rebase potentially rebases system if not already rebased.
-func (r *RpmOstreeClient) RebaseLayered(imgURL string) (changed bool, err error) {
+func (r *RpmOstreeClient) RebaseLayered(imgURL string, pullSecret []byte) (err error) {
+	err = ioutil.WriteFile(ostreeAuthFile, pullSecret, 0400)
+	if err != nil {
+		return
+	}
+	defer os.Remove(ostreeAuthFile)
 
 	defaultDeployment, err := r.GetBootedDeployment()
 	if err != nil {
@@ -347,12 +354,7 @@ func (r *RpmOstreeClient) RebaseLayered(imgURL string) (changed bool, err error)
 	glog.Infof("Executing rebase to %s", imgURL)
 	args := []string{"rebase", "--experimental", "ostree-unverified-registry:" + imgURL}
 
-	if err = runRpmOstree(args...); err != nil {
-		return
-	}
-
-	changed = true
-	return
+	return runRpmOstree(args...)
 }
 
 // Live apply live-applies whatever we rebased to
