@@ -17,6 +17,11 @@ type OperatingSystem struct {
 	VersionID string
 }
 
+var FCOS = OperatingSystem{
+	ID:        "fedora",
+	VariantID: "coreos",
+}
+
 // IsRHCOS is true if the OS is RHEL CoreOS
 func (os OperatingSystem) IsRHCOS() bool {
 	return os.ID == "rhcos"
@@ -24,7 +29,7 @@ func (os OperatingSystem) IsRHCOS() bool {
 
 // IsFCOS is true if the OS is RHEL CoreOS
 func (os OperatingSystem) IsFCOS() bool {
-	return os.ID == "fedora" && os.VariantID == "coreos"
+	return os.ID == FCOS.ID && os.VariantID == FCOS.VariantID
 }
 
 // IsCoreOSVariant is true if the OS is FCOS or a derivative (ostree+Ignition)
