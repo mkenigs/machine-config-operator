@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -425,6 +427,79 @@ func (r *RpmOstreeClient) RebaseLayered(imgURL string) (changed bool, err error)
 
 	changed = true
 	return
+}
+
+// allows unit testing
+var execCommand = exec.Command
+
+func runCmdSyncGetStdout(cmdName string, args ...string) (string, error) {
+	glog.Infof("Running: %s %s", cmdName, strings.Join(args, " "))
+	cmd := execCommand(cmdName, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", errors.Wrapf(err, "error running %s %s: %s", cmdName, strings.Join(args, " "), string(stderr.Bytes()))
+	}
+
+	return string(stdout.Bytes()), nil
+}
+
+type FileTree struct {
+	children map[string]*FileTree
+}
+
+// ensures nodes exist for every element in a path
+func (node *FileTree) insert(path []string) {
+	child, ok := node.children[path[0]]
+	if !ok {
+		// if we're inserting the first child for this node we need to create the map
+		if node.children == nil {
+			node.children = make(map[string]*FileTree)
+		}
+		// there isn't a node for the first element in the path, so we need to create one
+		child = &FileTree{}
+		node.children[path[0]] = child
+	}
+	if len(path) > 1 {
+		child.insert(path[1:])
+	}
+}
+
+// walk the tree, generating a list of all paths to leaves
+func (node *FileTree) walk() (paths []string) {
+	for childPath, child := range node.children {
+		pathsToLeaves := child.walk()
+		if len(pathsToLeaves) == 0 {
+			// child is a leaf, so add it to paths
+			paths = append(paths, path.Join("/", childPath))
+		} else {
+			// else prepend childPath to all pathsToLeaves
+			for _, pathToLeaf := range pathsToLeaves {
+				paths = append(paths, path.Join("/", childPath, pathToLeaf))
+			}
+		}
+	}
+	return
+}
+
+func Diff(fromRev, toRev string) ([]string, error) {
+	stdout, err := runCmdSyncGetStdout("ostree", "diff", fromRev, toRev)
+	if err != nil {
+		return []string{}, fmt.Errorf("failed to run ostree diff: %w", err)
+	}
+	paths := FileTree{}
+	lines := strings.Split(stdout, "\n")
+	for _, line := range lines {
+		words := strings.Fields(line)
+		// lines will be of the form
+		// {A,D,M} path
+		// all we care about is getting the path
+		splitPath := strings.Split(words[1], string(os.PathSeparator))
+		// pass splitPath[1:] since splitPath will have "" as its first element
+		paths.insert(splitPath[1:])
+	}
+	return paths.walk(), nil
 }
 
 func Cat(stateroot, commit, path string) ([]byte, error) {

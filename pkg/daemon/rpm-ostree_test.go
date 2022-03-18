@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -89,4 +91,31 @@ func TestValidateVersion(t *testing.T) {
 		}
 		assert.Nil(t, validateVersion(v))
 	}
+}
+
+// instead of calling exec with the actual command, run exec with a command that will run our TestExecDiff function, passing through command
+func fakeExecDiffCommand(command string, args ...string) *exec.Cmd {
+	return exec.Command(os.Args[0], "-test.run=TestExecDiff", "--", command)
+}
+
+// this isn't actually a test, it's a helper function that is our mock run of ostree diff
+func TestExecDiff(t *testing.T) {
+	fmt.Fprint(os.Stdout, `A    /usr/etc/transpiled.ign
+A    /usr/etc/rpm-ostree
+A    /usr/etc/rpm-ostree/origin.d
+A    /usr/etc/rpm-ostree/origin.d/extensions-48783c1.yaml`)
+	os.Exit(0)
+}
+
+func TestDiff(t *testing.T) {
+	execCommand = fakeExecDiffCommand
+	defer func() { execCommand = exec.Command }()
+	expectedDiffFileSet := []string{
+		"/usr/etc/transpiled.ign",
+		"/usr/etc/rpm-ostree/origin.d/extensions-48783c1.yaml",
+	}
+
+	diffFileSet, err := Diff("", "")
+	assert.Nil(t, err)
+	assert.Equal(t, expectedDiffFileSet, diffFileSet)
 }
