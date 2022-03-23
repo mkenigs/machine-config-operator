@@ -1985,6 +1985,12 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 
 	desiredImage := dn.node.Annotations[constants.DesiredImageConfigAnnotationKey]
 	desiredConfig := dn.node.Annotations[constants.DesiredMachineConfigAnnotationKey]
+	currentImage := dn.node.Annotations[constants.CurrentImageConfigAnnotationKey]
+
+	if currentImage == desiredImage {
+		glog.Infof("Node is on proper image %s; skipping update", currentImage)
+		return nil
+	}
 
 	// TODO drop NodeUpdaterClient or change its interface
 	client := &RpmOstreeClient{}
@@ -2109,17 +2115,24 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 			if !ctrlcommon.InSlice(postConfigChangeActionReboot, actions) {
 				client.ApplyLive()
 			}
+			// might reboot
 			if err := dn.performPostConfigChangeAction(actions, desiredImage); err != nil {
 				return err
 			}
 		}
 
 	}
+
+	// we've either live applied or rebooted after an update
+	// mark everything done
 	glog.Infof("Node is on proper image %s", desiredImage)
+
+	if _, err := setNodeAnnotations(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.node.Name, map[string]string{constants.CurrentImageConfigAnnotationKey: desiredImage}); err != nil {
+		return fmt.Errorf("failed to set %s to %s: %w", constants.CurrentImageConfigAnnotationKey, desiredImage, err)
+	}
 
 	if err := dn.completeUpdate(desiredImage); err != nil {
 		MCDUpdateState.WithLabelValues("", err.Error()).SetToCurrentTime()
-
 	}
 
 	if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
