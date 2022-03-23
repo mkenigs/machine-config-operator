@@ -2005,19 +2005,20 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 		}
 	}
 
+	var bootedIsLegacy, stagedIsLegacy bool
 	strippedBootedContainerImageReference, err := stripUnverifiedPrefix(booted.ContainerImageReference)
 	if err != nil {
-		return fmt.Errorf("could not strip booted.ContainerImageReference: %w", err)
+		bootedIsLegacy = true
 	}
 	var strippedStagedContainerImageReference string
 	if staged.ID != "" {
 		strippedStagedContainerImageReference, err = stripUnverifiedPrefix(staged.ContainerImageReference)
 		if err != nil {
-			return fmt.Errorf("could not strip staged.ContainerImageReference: %w", err)
+			stagedIsLegacy = true
 		}
 	}
 
-	if !(strippedBootedContainerImageReference == desiredImage && staged.ID == "" && booted.LiveReplaced == "" ||
+	if bootedIsLegacy || stagedIsLegacy || !(strippedBootedContainerImageReference == desiredImage && staged.ID == "" && booted.LiveReplaced == "" ||
 		strippedStagedContainerImageReference == desiredImage && booted.LiveReplaced == staged.Checksum) {
 		// At this point we know we need to rebase
 		if err := dn.setWorking(); err != nil {
