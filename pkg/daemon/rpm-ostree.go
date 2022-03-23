@@ -409,9 +409,12 @@ func ParseDiff(stdout []byte) []string {
 		// lines will be of the form
 		// {A,D,M} path
 		// all we care about is getting the path
-		splitPath := strings.Split(words[1], string(os.PathSeparator))
-		// pass splitPath[1:] since splitPath will have "" as its first element
-		paths.insert(splitPath[1:])
+		// add len check since last line will be empty
+		if len(words) >= 1 {
+			splitPath := strings.Split(words[1], string(os.PathSeparator))
+			// pass splitPath[1:] since splitPath will have "" as its first element
+			paths.insert(splitPath[1:])
+		}
 	}
 	return paths.walk()
 }

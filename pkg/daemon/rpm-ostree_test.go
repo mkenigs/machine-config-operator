@@ -54,10 +54,12 @@ func (r RpmOstreeClientMock) GetBootedDeployment() (*RpmOstreeDeployment, error)
 }
 
 func TestParseDiff(t *testing.T) {
+	// this deliberately has a trailing newline to check parsing an empty line
 	diff := `A    /usr/etc/transpiled.ign
 A    /usr/etc/rpm-ostree
 A    /usr/etc/rpm-ostree/origin.d
-A    /usr/etc/rpm-ostree/origin.d/extensions-48783c1.yaml`
+A    /usr/etc/rpm-ostree/origin.d/extensions-48783c1.yaml
+`
 	expectedDiffFileSet := []string{
 		"/usr/etc/transpiled.ign",
 		"/usr/etc/rpm-ostree/origin.d/extensions-48783c1.yaml",
