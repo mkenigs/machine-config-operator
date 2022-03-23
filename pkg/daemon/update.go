@@ -1970,45 +1970,55 @@ func (dn *Daemon) reboot(rationale string) error {
 	return fmt.Errorf("reboot failed; this error should be unreachable, something is seriously wrong")
 }
 
+func stripUnverifiedPrefix(containerImageReference string) (string, error) {
+	containerURLTokens := strings.SplitN(containerImageReference, ":", 2)
+	if len(containerURLTokens) < 2 || containerURLTokens[0] != "ostree-unverified-registry" {
+		return "", fmt.Errorf("failed to strip ostree-unverified-registry: from %q", containerImageReference)
+	}
+	return containerURLTokens[1], nil
+}
+
 // experimentalUpdateLayeredConfig() pretends to do the normal config update for the pool but actually does
 // an image update instead. This function should be completely thrown away.
 // TODO(jkyros): right now this skips drain and reboot, it just live-applies it, but you *can* boot it and it will work
 func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 
 	desiredImage := dn.node.Annotations[constants.DesiredImageConfigAnnotationKey]
-	currentImage := dn.node.Annotations[constants.CurrentImageConfigAnnotationKey]
 	desiredConfig := dn.node.Annotations[constants.DesiredMachineConfigAnnotationKey]
 
-	// Layered doesn't exist right out of the gate right now, it takes some time to reconcile
-	// We should never get here now though, since node-controller is waiting for the image
-	if desiredImage == "" {
-		glog.Infof("Looks like we don't have a desired image yet. Nothing to do.")
-		return nil
+	// TODO drop NodeUpdaterClient or change its interface
+	client := &RpmOstreeClient{}
+
+	state, err := client.GetStatusStructured()
+	if err != nil {
+		return err
 	}
 
-	// currentImage == desiredImage is equivalent to:
-	// booted.ContainerImageReference == desiredImage && staged.ID == "" && booted.LiveReplaced == ""
-	// ||
-	// staged.ContainerImageReference == desiredImage && booted.LiveReplaced == staged.Checksum
-	// I don't set currentImage ever, so we always hit the else block right now
-	if currentImage == desiredImage {
-		// Orrrr....if we've live updated to it
-		glog.Infof("Node is on proper image %s", desiredImage)
-
-		glog.Infof("Completing pending config %s", currentImage)
-		if err := dn.completeUpdate(currentImage); err != nil {
-			MCDUpdateState.WithLabelValues("", err.Error()).SetToCurrentTime()
-
+	var staged Deployment
+	var booted Deployment
+	for _, deployment := range state.Deployments {
+		if deployment.Staged {
+			staged = deployment
 		}
-
-		// TODO(jkyros): For now I'm just making the pool happy so it's like "yeah I'm done"
-		if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
-			errLabelStr := fmt.Sprintf("error setting node's state to Done: %v", err)
-			MCDUpdateState.WithLabelValues("", errLabelStr).SetToCurrentTime()
-			return nil
+		if deployment.Booted {
+			booted = deployment
 		}
+	}
 
-	} else {
+	strippedBootedContainerImageReference, err := stripUnverifiedPrefix(booted.ContainerImageReference)
+	if err != nil {
+		return fmt.Errorf("could not strip booted.ContainerImageReference: %w", err)
+	}
+	var strippedStagedContainerImageReference string
+	if staged.ID != "" {
+		strippedStagedContainerImageReference, err = stripUnverifiedPrefix(staged.ContainerImageReference)
+		if err != nil {
+			return fmt.Errorf("could not strip staged.ContainerImageReference: %w", err)
+		}
+	}
+
+	if !(strippedBootedContainerImageReference == desiredImage && staged.ID == "" && booted.LiveReplaced == "" ||
+		strippedStagedContainerImageReference == desiredImage && booted.LiveReplaced == staged.Checksum) {
 		// At this point we know we need to rebase
 		if err := dn.setWorking(); err != nil {
 			return fmt.Errorf("failed to set working: %w", err)
@@ -2019,8 +2029,6 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 			return err
 		}
 
-		// TODO drop NodeUpdaterClient or change its interface
-		client := &RpmOstreeClient{}
 		if err := client.RebaseLayered(desiredImage, pullSecret); err != nil {
 			return err
 		}
@@ -2035,9 +2043,6 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 		if err != nil {
 			return err
 		}
-
-		var staged Deployment
-		var booted Deployment
 		for _, deployment := range state.Deployments {
 			if deployment.Staged {
 				staged = deployment
@@ -2106,6 +2111,13 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 			if err := dn.performPostConfigChangeAction(actions, desiredImage); err != nil {
 				return err
 			}
+		}
+
+		glog.Infof("Node is on proper image %s", desiredImage)
+
+		if err := dn.completeUpdate(desiredImage); err != nil {
+			MCDUpdateState.WithLabelValues("", err.Error()).SetToCurrentTime()
+
 		}
 
 		if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
