@@ -333,6 +333,8 @@ func (r *RpmOstreeClient) logCustomOrigin() {
 
 // RebaseLayered potentially rebases system if not already rebased.
 func (r *RpmOstreeClient) RebaseLayered(imgURL string, pullSecret []byte) (err error) {
+	// TODO(jkyros): take this out once https://github.com/ostreedev/ostree/pull/2563 merges and is available
+	os.Mkdir("/run/ostree", 0544)
 	err = ioutil.WriteFile(ostreeAuthFile, pullSecret, 0400)
 	if err != nil {
 		return
