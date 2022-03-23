@@ -2114,22 +2114,22 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 			}
 		}
 
-		glog.Infof("Node is on proper image %s", desiredImage)
+	}
+	glog.Infof("Node is on proper image %s", desiredImage)
 
-		if err := dn.completeUpdate(desiredImage); err != nil {
-			MCDUpdateState.WithLabelValues("", err.Error()).SetToCurrentTime()
+	if err := dn.completeUpdate(desiredImage); err != nil {
+		MCDUpdateState.WithLabelValues("", err.Error()).SetToCurrentTime()
 
-		}
+	}
 
-		if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
-			errLabelStr := fmt.Sprintf("error setting node's state to Done: %v", err)
-			MCDUpdateState.WithLabelValues("", errLabelStr).SetToCurrentTime()
-			return nil
-		}
+	if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
+		errLabelStr := fmt.Sprintf("error setting node's state to Done: %v", err)
+		MCDUpdateState.WithLabelValues("", errLabelStr).SetToCurrentTime()
+		return nil
+	}
 
-		if dn.recorder != nil {
-			dn.recorder.Eventf(getNodeRef(dn.node), corev1.EventTypeNormal, "NodeDone", fmt.Sprintf("Setting node %s, currentConfig %s to Done", dn.node.Name, desiredImage))
-		}
+	if dn.recorder != nil {
+		dn.recorder.Eventf(getNodeRef(dn.node), corev1.EventTypeNormal, "NodeDone", fmt.Sprintf("Setting node %s, currentConfig %s to Done", dn.node.Name, desiredImage))
 	}
 
 	return nil
