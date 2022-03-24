@@ -66,8 +66,8 @@ func MachineConfigToIgnition(mcSpec *mcSpecv1.MachineConfigSpec) (ign3types.Conf
 }
 
 type TreeFile struct {
-	Packages       []string `yaml:"packages"`
-	OverrideRemove []string `yaml:"override-remove"`
+	Packages       []string `yaml:"packages,omitempty"`
+	OverrideRemove []string `yaml:"override-remove,omitempty"`
 }
 
 func (treeFile TreeFile) isEmpty() bool {
