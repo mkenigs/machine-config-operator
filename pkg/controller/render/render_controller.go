@@ -838,9 +838,10 @@ func (ctrl *Controller) experimentalAddBuildConfigs(pool *mcfgv1.MachineConfigPo
 
 	# clean up. We want to be particularly strict so that live apply works
 	RUN rm /etc/machine-config-ignition.json
-	RUN bash -c "rm /usr/share/rpm/__db.*"
+	# don't fail if wildcard has no matches
+	RUN bash -c "rm /usr/share/rpm/__db.*"; true
 	# to keep live apply working
-	RUN sort /usr/etc/systemd/system-preset/20-ignition.preset -o /usr/etc/systemd/system-preset/20-ignition.preset
+	RUN bash -c "if [[ -e /usr/etc/systemd/system-preset/20-ignition.preset ]]; then sort /usr/etc/systemd/system-preset/20-ignition.preset -o /usr/etc/systemd/system-preset/20-ignition.preset; fi"
 
 	# This is so we can get the machineconfig injected
 	ARG machineconfig=unknown
