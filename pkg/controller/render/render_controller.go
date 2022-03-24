@@ -836,6 +836,11 @@ func (ctrl *Controller) experimentalAddBuildConfigs(pool *mcfgv1.MachineConfigPo
 	# Rebuild origin.d (I included an /etc/yum.repos.d/ file in my machineconfig so it could find the RPMS, that's why this works)
 	RUN rpm-ostree ex rebuild && rm -rf /var/cache /etc/rpm-ostree/origin.d
 
+	# clean up. We want to be particularly strict so that live apply works
+	RUN rm /etc/machine-config-ignition.json
+	RUN bash -c "rm /usr/share/rpm/__db.*"
+	# to keep live apply working
+	RUN sort /usr/etc/systemd/system-preset/20-ignition.preset -o /usr/etc/systemd/system-preset/20-ignition.preset
 
 	# This is so we can get the machineconfig injected
 	ARG machineconfig=unknown
