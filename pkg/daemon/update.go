@@ -2071,6 +2071,11 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 			if err != nil {
 				return fmt.Errorf("failed to diff container images: %w", err)
 			}
+			for i, path := range diffFileSet {
+				if strings.HasPrefix(path, "/usr/etc") {
+					diffFileSet[i] = strings.TrimPrefix(path, "/etc")
+				}
+			}
 			actions, err := dn.calculatePostConfigChangeActionFromFiles(diffFileSet)
 			if err != nil {
 				return err
