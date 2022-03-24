@@ -2024,8 +2024,9 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 		}
 	}
 
-	if bootedIsLegacy || stagedIsLegacy || !(strippedBootedContainerImageReference == desiredImage && staged.ID == "" && booted.LiveReplaced == "" ||
-		strippedStagedContainerImageReference == desiredImage && booted.LiveReplaced == staged.Checksum) {
+	if bootedIsLegacy || stagedIsLegacy ||
+		!(strippedBootedContainerImageReference == desiredImage && staged.ID == "" && booted.LiveReplaced == "" ||
+			strippedStagedContainerImageReference == desiredImage && booted.LiveReplaced == staged.Checksum) {
 		// At this point we know we need to rebase
 		if err := dn.setWorking(); err != nil {
 			return fmt.Errorf("failed to set working: %w", err)
@@ -2053,9 +2054,6 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 		for _, deployment := range state.Deployments {
 			if deployment.Staged {
 				staged = deployment
-			}
-			if deployment.Booted {
-				booted = deployment
 			}
 		}
 		var activeChecksum string
