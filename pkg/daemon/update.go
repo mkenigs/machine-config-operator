@@ -2127,6 +2127,13 @@ func (dn *Daemon) experimentalUpdateLayeredConfig() error {
 		return nil
 	}
 
+	desiredConfig := dn.node.Annotations[constants.DesiredMachineConfigAnnotationKey]
+	if err := dn.nodeWriter.SetDone(dn.kubeClient.CoreV1().Nodes(), dn.nodeLister, dn.name, desiredConfig); err != nil {
+		errLabelStr := fmt.Sprintf("error setting node's state to Done: %v", err)
+		MCDUpdateState.WithLabelValues("", errLabelStr).SetToCurrentTime()
+		return nil
+	}
+
 	if dn.recorder != nil {
 		dn.recorder.Eventf(getNodeRef(dn.node), corev1.EventTypeNormal, "NodeDone", fmt.Sprintf("Setting node %s, currentConfig %s to Done", dn.node.Name, desiredImage))
 	}
