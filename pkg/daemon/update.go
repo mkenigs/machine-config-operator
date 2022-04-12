@@ -66,6 +66,29 @@ var (
 	nonFCOSAuthKeyPath     = filepath.Join(coreUserSSHPath, "authorized_keys")
 )
 
+type LayeredUpdater struct {
+	*Daemon
+}
+
+func (dn *Daemon) NewLayeredUpdater() *LayeredUpdater {
+	return &LayeredUpdater{
+		Daemon: dn,
+	}
+}
+
+type MCUpdater struct {
+	*Daemon
+	oldConfig, newConfig *mcfgv1.MachineConfig
+}
+
+func (dn *Daemon) NewMCUpdater(oldConfig, newConfig *mcfgv1.MachineConfig) *MCUpdater {
+	return &MCUpdater{
+		Daemon:    dn,
+		oldConfig: oldConfig,
+		newConfig: newConfig,
+	}
+}
+
 func writeFileAtomicallyWithDefaults(fpath string, b []byte) error {
 	return writeFileAtomically(fpath, b, defaultDirectoryPermissions, defaultFilePermissions, -1, -1)
 }
@@ -502,7 +525,11 @@ func getIgnitionFileDataReadFunc(ignConfig *ign3types.Config) ReadFileFunc {
 }
 
 // update the node to the provided node configuration.
-func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr error) {
+func (dn *MCUpdater) update() (retErr error) {
+	// TODO we should probably access these directly and stop passing these around to functions, but that can be changed later
+	oldConfig := dn.oldConfig
+	newConfig := dn.newConfig
+
 	if err := dn.setWorking(); err != nil {
 		return fmt.Errorf("failed to set working: %w", err)
 	}
@@ -586,7 +613,7 @@ func (dn *Daemon) update(oldConfig, newConfig *mcfgv1.MachineConfig) (retErr err
 	}()
 
 	if dn.os.IsCoreOSVariant() {
-		coreOSDaemon := CoreOSDaemon{dn}
+		coreOSDaemon := CoreOSDaemon{dn.Daemon}
 		if err := coreOSDaemon.applyOSChanges(*diff, oldConfig, newConfig); err != nil {
 			return err
 		}
@@ -2008,10 +2035,10 @@ func onDesiredImage(desiredImage string, booted, staged Deployment) (bool, bool)
 		strippedStagedContainerImageReference != desiredImage
 }
 
-// experimentalUpdateLayeredConfig() pretends to do the normal config update for the pool but actually does
+// update() pretends to do the normal config update for the pool but actually does
 // an image update instead. This function should be completely thrown away.
 // TODO(jkyros): right now this skips drain and reboot, it just live-applies it, but you *can* boot it and it will work
-func (dn *Daemon) experimentalUpdateLayeredConfig() error {
+func (dn *LayeredUpdater) update() error {
 
 	desiredImage := dn.node.Annotations[constants.DesiredImageConfigAnnotationKey]
 	currentImage := dn.node.Annotations[constants.CurrentImageConfigAnnotationKey]

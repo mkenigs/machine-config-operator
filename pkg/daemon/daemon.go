@@ -467,7 +467,7 @@ func (dn *Daemon) syncNode(key string) error {
 		}
 		if dn.isLayeredNode() {
 			// experimentalUpdateLayeredConfig is idempotent
-			return dn.experimentalUpdateLayeredConfig()
+			return dn.NewLayeredUpdater().update()
 		}
 		if err := dn.checkStateOnFirstRun(); err != nil {
 			return err
@@ -614,7 +614,7 @@ func (dn *Daemon) RunFirstbootCompleteMachineconfig() error {
 	}
 
 	dn.skipReboot = true
-	err = dn.update(nil, &mc)
+	err = dn.NewMCUpdater(nil, &mc).update()
 	if err != nil {
 		return err
 	}
@@ -1329,7 +1329,7 @@ func (dn *Daemon) runOnceFromMachineConfig(machineConfig mcfgv1.MachineConfig, c
 	}
 	if contentFrom == onceFromLocalConfig {
 		// Execute update without hitting the cluster
-		return dn.update(nil, &machineConfig)
+		return dn.NewMCUpdater(nil, &machineConfig).update()
 	}
 	// Otherwise return an error as the input format is unsupported
 	return fmt.Errorf("%v is not a path nor url; can not run once", contentFrom)
@@ -1506,11 +1506,11 @@ func (dn *Daemon) triggerUpdateWithMachineConfig(currentConfig, desiredConfig *m
 
 	// Hack in our layered node workflow for pools labeled as "layered"
 	if dn.isLayeredNode() {
-		return dn.experimentalUpdateLayeredConfig()
+		return dn.NewLayeredUpdater().update()
 	}
 
 	// run the update process. this function doesn't currently return.
-	return dn.update(currentConfig, desiredConfig)
+	return dn.NewMCUpdater(currentConfig, desiredConfig).update()
 }
 
 // validateOnDiskState compares the on-disk state against what a configuration
